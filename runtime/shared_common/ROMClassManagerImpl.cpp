@@ -33,6 +33,10 @@
 #include "j9shrnls.h"
 #include "j9consts.h"
 #include <string.h>
+#include <unordered_set>
+
+std::unordered_set<J9ROMClass*> modified_ROMClass;
+void listROMClassMethods(J9ROMClass *romClass);
 
 SH_ROMClassManagerImpl::SH_ROMClassManagerImpl()
  : _tsm(0),
@@ -521,6 +525,14 @@ SH_ROMClassManagerImpl::locateROMClass(J9VMThread* currentThread, const char* pa
 							/* trace event is at level 1 and trace exit message is at level 2 as per CMVC 155318/157683  */
 							Trc_SHR_RMI_locateROMClass_TimestampChanged_Event(currentThread, pathLen, path, callerHelperID, cpeIndex);							
 							Trc_SHR_RMI_locateROMClass_ExitRcTimestampChanged(currentThread);
+							//ROM class is found but the timestamp changed. -> The methods of this class are to be deemed changed.
+							
+							J9ROMClass* locatedJ9ROMClass = (J9ROMClass*) _cache->getAddressFromJ9ShrOffset(&(match->romClassOffset));
+							// J9UTF8* className = J9ROMCLASS_CLASSNAME(locatedJ9ROMClass);
+							// printf("-----match Class name: %.*s-----\n", J9UTF8_LENGTH(className), J9UTF8_DATA(className));
+							// listROMClassMethods(locatedJ9ROMClass);
+							modified_ROMClass.insert(locatedJ9ROMClass);
+
 							return (LOCATE_ROMCLASS_RETURN_MARKED_ITEM_STALE | LOCATE_ROMCLASS_RETURN_NOTFOUND);
 						}
 						if (!localCPM) {
@@ -620,4 +632,24 @@ SH_ROMClassManagerImpl::customCountItemsInList(void* entry, void* opaque)
 		walk = walk->_next;
 	} while (node != walk);
 	return 0;
+}
+
+void listROMClassMethods(J9ROMClass *romClass) {
+    UDATA methodCount = romClass->romMethodCount;
+    J9ROMMethod *romMethod = J9ROMCLASS_ROMMETHODS(romClass); // Get first method
+    
+    for (UDATA i = 0; i < methodCount; i++) {
+        // Extract method name and signature
+        J9UTF8 *nameUTF8 = J9ROMMETHOD_NAME(romMethod);
+        J9UTF8 *sigUTF8 = J9ROMMETHOD_SIGNATURE(romMethod);
+        
+        printf(
+            "Method %zu: %.*s%.*s\n",
+            i,
+            (int)J9UTF8_LENGTH(nameUTF8), J9UTF8_DATA(nameUTF8),
+            (int)J9UTF8_LENGTH(sigUTF8), J9UTF8_DATA(sigUTF8)
+        );
+        
+		romMethod = nextROMMethod(romMethod);
+    }
 }

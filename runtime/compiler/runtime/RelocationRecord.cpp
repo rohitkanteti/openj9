@@ -1052,7 +1052,6 @@ TR_RelocationRecord::applyRelocationAtAllOffsets(TR_RelocationRuntime *reloRunti
    int32_t sizeOfHeader = bytesInHeader(reloRuntime, reloTarget);
    if (sizeOfHeader <= 0)
       return TR_RelocationErrorCode::unknownRelocation;
-
    if (reloTarget->isOrderedPairRelocation(this, reloTarget))
       {
       if (wideOffsets(reloTarget))

@@ -11,22 +11,17 @@
 #include "RelocationRuntime.hpp"
 
 extern MethodSet computeMSetForMethod(TR::Compilation *comp, TR::ResolvedMethodSymbol *methodSymbol);
-
+extern TR_ResolvedMethod *getCachedResolvedMethodFromPtr(TR::Compilation *comp, TR_OpaqueMethodBlock *methodPtr);
 class recompilation_test {
 public:
    
     TR_RelocationRuntime *reloRuntime;
 
 
-    std::unordered_set<PAGNode*> points_to(PAGNode* src)
-    {
-        return regularPT(src);
-    }
-
     // boolean REACH(Node target_obj, Node start_node, PAG p):
      bool REACH(PAGNode* target_obj, PAGNode* start_node, PointerAssignmentGraph* p) {
         // Case 1:
-        std::unordered_set<PAGNode*> objs = points_to(start_node);
+        std::unordered_set<PAGNode*> objs = p->points_to(start_node);
         if (objs.find(target_obj) != objs.end())
             return true;
 
@@ -77,12 +72,12 @@ public:
     }
 
     // boolean should_recompile(Method mx,Method my_prime,PAG p_prime,PAG p)
-     bool should_recompile(int mx, int my_prime,PointerAssignmentGraph* p_prime,vector<PAGEdge *> old_allocated_edges,vector<PAGNode *> old_escaping_objects) {
+     bool should_recompile(int mx, int my_prime,PointerAssignmentGraph* p_prime,unordered_set<PAGEdge *> old_allocated_edges,unordered_set<PAGNode *> old_escaping_objects) {
         // Get allocated objects in mx
-        // auto old_allocated_edges = p->getAllocEdges(mx); // o1 -> temp, for stmt `temp: new A()` in il-trees
+        // auto old_allocated_edges = p->getAllocEdges(mx); // E: o1 --NEW--> temp, for stmt `temp: new A()` in il-trees
 
         // Get escaping objects in mx in p
-        // auto old_escaping_objects = p->getEscapingObjects(mx);
+        // auto old_escaping_objects = p->getEscapingObjects(mx);   
 
         // Get leaky nodes in the updated PAG p'
         auto leaky_nodes = p_prime->getLeakyNodes();
@@ -117,7 +112,7 @@ public:
         return false;  // No recompilation needed
     }
 
-     PointerAssignmentGraph* update_PAG(PointerAssignmentGraph* p, int my,int my_prime, CallGraph* CG) {
+     PointerAssignmentGraph* update_PAG(PointerAssignmentGraph* p, int my,TR_OpaqueMethodBlock* my_prime_methodBlock , CallGraph* CG) {
 
         // remove interprocedural edges [All the edges to formal params are `assign` edges]
         for (PAGNode* f_param : p->getFormalParameterNodes(my)) {
@@ -162,7 +157,7 @@ public:
         for (PAGEdge* e : p->getStoreEdges(my)) {
             // f is  field or field of a class extending Thread or implementing Runnable,
             // then remove x from the leaky nodes set
-            if (isField(e->field) || isThreadClassField(e->field)) {
+            if (isStaticField(e->field,p) || isThreadClassField(e->field,p)) {
                 p->LeakyNodes.erase(e->src);
             }
             p->removeEdge(e);
@@ -180,8 +175,27 @@ public:
         // use computeMSetForMethod(TR::Compilation *comp, TR::ResolvedMethodSymbol *methodSymbol)
         // computeMsetForMethod call will create all the nodes for actual/formal and return nodes and also add the edges(both intra/inter)
             TR::Compilation *comp = reloRuntime->comp();
-
             // TR::ResolvedMethodSymbol *methodSymbol = 
+            // Get TR_OpaqueMethodBlock* from method index
+            // TR_OpaqueMethodBlock* methodBlock = nullptr;
+            // for (auto& entry : _methodIndicesPtr) {
+            //     if (entry.second == my) {
+            //         methodBlock = entry.first;
+            //         break;
+            //     }
+            // }
+            // if (!methodBlock) {
+            //     return;
+            // }
+
+            TR_ResolvedMethod* resolvedMethod = getCachedResolvedMethodFromPtr(comp, my_prime_methodBlock);
+            TR::ResolvedMethodSymbol* methodSymbol = resolvedMethod->findOrCreateJittedMethodSymbol(comp);
+
+            // Get frontend and generate IL
+            TR_J9VMBase* fe = (TR_J9VMBase*)comp->fe();
+           bool ilGenFailed = NULL == resolvedMethod->genMethodILForPeekingEvenUnderMethodRedefinition(methodSymbol, comp, false);
+           TR_ASSERT_FATAL(!ilGenFailed, "IL Gen failed for my_prime");
+
 
         // add interprocedural edges
         // auto f_params = p->getFormalParameterNodes(my_prime); // These should not change from my to my_prime
@@ -205,8 +219,8 @@ public:
         // }
 
         // add match edges
-        for (PAGEdge* e1 : p->getStoreEdges(my_prime)) {
-            for (PAGEdge* e2 : p->getLoadEdges(my_prime)) {
+        for (PAGEdge* e1 : p->getStoreEdges(my)) {
+            for (PAGEdge* e2 : p->getLoadEdges(my)) {
                 if (e1->field == e2->field) {
                     p->addEdge(e1->src, e2->dest, MATCH);
                 }
@@ -241,14 +255,13 @@ public:
         return targets;
     }
 
-    // Placeholder methods
-     bool isField(std::string field) {
-        // Implement actual logic
-        return false;
+     bool isStaticField(std::string field,PointerAssignmentGraph* p) {
+       
+        return p->staticFields.find(field) != p->staticFields.end();
     }
 
-     bool isThreadClassField(std::string field) {
-        // Implement actual logic
-        return false;
+     bool isThreadClassField(std::string field,PointerAssignmentGraph* p) {
+       
+        return p->threadAccessibleFields.find(field) != p->threadAccessibleFields.end();
     }
 };
