@@ -120,7 +120,7 @@ mv $(ls | grep -i jdk-21) bootjdk21
 :penguin:
 First you need to clone the Extensions for OpenJDK for OpenJ9 project. This repository is a git mirror of OpenJDK without the HotSpot JVM, but with an **openj9** branch that contains a few necessary patches. Run the following command:
 ```
-git clone https://github.com/ibmruntimes/openj9-openjdk-jdk21.git
+git clone https://github.com/rohitkanteti/openj9-openjdk-jdk21.git
 ```
 Cloning this repository can take a while because OpenJDK is a large project! When the process is complete, change directory into the cloned repository:
 ```
@@ -248,7 +248,7 @@ It is important to take the list of package dependencies from this file because 
 :blue_book:
 First you need to clone the Extensions for OpenJDK for OpenJ9 project. This repository is a git mirror of OpenJDK without the HotSpot JVM, but with an **openj9** branch that contains a few necessary patches. Run the following command:
 ```
-git clone https://github.com/ibmruntimes/openj9-openjdk-jdk21.git
+git clone https://github.com/rohitkanteti/openj9-openjdk-jdk21.git
 ```
 Cloning this repository can take a while because OpenJDK is a large project! When the process is complete, change directory into the cloned repository:
 ```
@@ -402,7 +402,7 @@ First you need to clone the Extensions for OpenJDK for OpenJ9 project. This repo
 
 Run the following command in the Cygwin terminal:
 ```
-git clone https://github.com/ibmruntimes/openj9-openjdk-jdk21.git
+git clone https://github.com/rohitkanteti/openj9-openjdk-jdk21.git
 ```
 Cloning this repository can take a while because OpenJDK is a large project! When the process is complete, change directory into the cloned repository:
 ```
@@ -544,7 +544,7 @@ First you need to clone the Extensions for OpenJDK for OpenJ9 project. This repo
 
 Run the following command:
 ```
-git clone https://github.com/ibmruntimes/openj9-openjdk-jdk21.git
+git clone https://github.com/rohitkanteti/openj9-openjdk-jdk21.git
 ```
 Cloning this repository can take a while because OpenJDK is a large project! When the process is complete, change directory into the cloned repository:
 ```
@@ -659,7 +659,7 @@ The binary can be built on your AArch64 Linux system, or in a Docker container :
 :penguin:
 First you need to clone the Extensions for OpenJDK for OpenJ9 project. This repository is a git mirror of OpenJDK without the HotSpot JVM, but with an **openj9** branch that contains a few necessary patches. Run the following command:
 ```
-git clone https://github.com/ibmruntimes/openj9-openjdk-jdk21.git
+git clone https://github.com/rohitkanteti/openj9-openjdk-jdk21.git
 ```
 Cloning this repository can take a while because OpenJDK is a large project! When the process is complete, change directory into the cloned repository:
 ```
