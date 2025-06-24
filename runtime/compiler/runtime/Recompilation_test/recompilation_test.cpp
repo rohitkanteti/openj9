@@ -1,75 +1,20 @@
 #pragma once
-#include "omr/compiler/optimizer/PAG/PointerAssignmentGraph.cpp"
-#include "omr/compiler/optimizer/PAG/CallGraph.cpp"
-#include "omr/compiler/optimizer/PAG/regularPT.cpp"
+#include "../../../../../omr/compiler/optimizer/PAG/PointerAssignmentGraph.hpp"
+#include "../../../../../omr/compiler/optimizer/PAG/CallGraph.hpp"
 #include <unordered_set>
-#include <unordered_map>
 #include <queue>
 #include <set>
 #include <vector>
-#include "methodSet.cpp"
-#include "RelocationRuntime.hpp"
+#include "../RelocationRuntime.hpp"
 
-extern MethodSet computeMSetForMethod(TR::Compilation *comp, TR::ResolvedMethodSymbol *methodSymbol);
 extern TR_ResolvedMethod *getCachedResolvedMethodFromPtr(TR::Compilation *comp, TR_OpaqueMethodBlock *methodPtr);
+
+PointerAssignmentGraph* pag_to_use = nullptr;
 class recompilation_test {
 public:
    
     TR_RelocationRuntime *reloRuntime;
 
-
-    // boolean REACH(Node target_obj, Node start_node, PAG p):
-     bool REACH(PAGNode* target_obj, PAGNode* start_node, PointerAssignmentGraph* p) {
-        // Case 1:
-        std::unordered_set<PAGNode*> objs = p->points_to(start_node);
-        if (objs.find(target_obj) != objs.end())
-            return true;
-
-        std::set<std::pair<PAGNode*, std::vector<std::string>>> visited;
-
-        // Queue for BFS traversal (object, field_path)
-        std::queue<std::pair<PAGNode*, std::vector<std::string>>> queue;
-
-        // Enqueue all objects directly pointed to by start_node
-        for (PAGNode* obj : objs) {
-            queue.push({obj, {}});
-            visited.insert({obj, {}});
-        }
-
-        while (!queue.empty()) {
-            auto front = queue.front();
-            auto current_obj = front.first;
-            auto field_path = front.second;
-            queue.pop();
-
-            // Check if current object matches target_obj
-            if (current_obj == target_obj)
-                return true;
-
-            // Explore fields of the current object
-            for (std::string field : p->get_fields(current_obj)) {
-                
-                auto next_objs = p->get_field_target(current_obj, field);
-                auto new_field_path = field_path;
-                new_field_path.push_back(field);
-
-                for (PAGNode* next_obj : next_objs) {
-                    auto path_key = std::make_pair(next_obj, new_field_path);
-
-                    if (visited.find(path_key) == visited.end()) {
-                        visited.insert(path_key);
-                        queue.push({next_obj, new_field_path});
-                    }
-
-                    // Check if this path reaches target_obj
-                    if (next_obj == target_obj)
-                        return true;
-                }
-            }
-        }
-
-        return false;
-    }
 
     // boolean should_recompile(Method mx,Method my_prime,PAG p_prime,PAG p)
      bool should_recompile(int mx, int my_prime,PointerAssignmentGraph* p_prime,unordered_set<PAGEdge *> old_allocated_edges,unordered_set<PAGNode *> old_escaping_objects) {
@@ -193,8 +138,9 @@ public:
 
             // Get frontend and generate IL
             TR_J9VMBase* fe = (TR_J9VMBase*)comp->fe();
-           bool ilGenFailed = NULL == resolvedMethod->genMethodILForPeekingEvenUnderMethodRedefinition(methodSymbol, comp, false);
-           TR_ASSERT_FATAL(!ilGenFailed, "IL Gen failed for my_prime");
+            pag_to_use = p;
+            bool ilGenFailed = NULL == resolvedMethod->genMethodILForPeekingEvenUnderMethodRedefinition(methodSymbol, comp, false);
+            TR_ASSERT_FATAL(!ilGenFailed, "IL Gen failed for my_prime");
 
 
         // add interprocedural edges
@@ -264,4 +210,58 @@ public:
        
         return p->threadAccessibleFields.find(field) != p->threadAccessibleFields.end();
     }
+
+    // boolean REACH(Node target_obj, Node start_node, PAG p):
+     bool REACH(PAGNode* target_obj, PAGNode* start_node, PointerAssignmentGraph* p) {
+        // Case 1:
+        std::unordered_set<PAGNode*> objs = p->points_to(start_node);
+        if (objs.find(target_obj) != objs.end())
+            return true;
+
+        std::set<std::pair<PAGNode*, std::vector<std::string>>> visited;
+
+        // Queue for BFS traversal (object, field_path)
+        std::queue<std::pair<PAGNode*, std::vector<std::string>>> queue;
+
+        // Enqueue all objects directly pointed to by start_node
+        for (PAGNode* obj : objs) {
+            queue.push({obj, {}});
+            visited.insert({obj, {}});
+        }
+
+        while (!queue.empty()) {
+            auto front = queue.front();
+            auto current_obj = front.first;
+            auto field_path = front.second;
+            queue.pop();
+
+            // Check if current object matches target_obj
+            if (current_obj == target_obj)
+                return true;
+
+            // Explore fields of the current object
+            for (std::string field : p->get_fields(current_obj)) {
+                
+                auto next_objs = p->get_field_target(current_obj, field);
+                auto new_field_path = field_path;
+                new_field_path.push_back(field);
+
+                for (PAGNode* next_obj : next_objs) {
+                    auto path_key = std::make_pair(next_obj, new_field_path);
+
+                    if (visited.find(path_key) == visited.end()) {
+                        visited.insert(path_key);
+                        queue.push({next_obj, new_field_path});
+                    }
+
+                    // Check if this path reaches target_obj
+                    if (next_obj == target_obj)
+                        return true;
+                }
+            }
+        }
+
+        return false;
+    }
+
 };

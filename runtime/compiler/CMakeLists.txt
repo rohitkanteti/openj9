@@ -387,6 +387,7 @@ target_link_libraries(j9jit
 		j9utilcore
 		j9hookable
 		j9thr
+        # j9shrcommon
 		${CMAKE_DL_LIBS}
 )
 

@@ -21,6 +21,7 @@
  *******************************************************************************/
 
 #include <stdint.h>
+#include <iostream>
 #include "jilconsts.h"
 #include "jitprotos.h"
 #include "jvminit.h"
@@ -64,6 +65,60 @@
 #include "runtime/JITServerAOTDeserializer.hpp"
 #endif /* defined(J9VM_OPT_JITSERVER) */
 
+
+#include "runtime/Recompilation_test/recompilation_test.cpp"
+#include "../../../../omr/compiler/optimizer/loadingPAG/LoadPAG.cpp"
+
+std::unordered_set<J9ROMClass*> modified_ROMClass;
+// extern std::unordered_set<J9ROMClass*>& getModifiedROMClassSet() ;
+
+std::vector<TR_OpaqueMethodBlock*> getMethodBlocksForClass(const std::string& class_name, TR::Compilation* comp)
+{
+    std::vector<TR_OpaqueMethodBlock*> methodBlocks;
+
+    TR_J9VMBase* fej9 = (TR_J9VMBase*)comp->fe();
+    TR_OpaqueClassBlock* clazz = fej9->getClassFromSignature(class_name.c_str(), class_name.length(), comp->getCurrentMethod());
+
+    if (!clazz) {
+        // Class is not loaded; cannot force-load from JIT
+        // std::cerr << "Class not loaded: " << class_name << std::endl;
+        return methodBlocks;
+    }
+
+    J9Class* j9Class = (J9Class*)clazz;
+    J9ROMClass* romClass = j9Class->romClass;
+    if (!romClass) return methodBlocks;
+
+    J9ROMMethod* romMethod = J9ROMCLASS_ROMMETHODS(romClass);
+    for (U_32 i = 0; i < romClass->romMethodCount; i++) {
+        J9Method* ramMethod = &j9Class->ramMethods[i];
+		TR_OpaqueMethodBlock* method_block = reinterpret_cast<TR_OpaqueMethodBlock*>(ramMethod);
+        methodBlocks.push_back(method_block);
+		// std::cout << "Method added is: " ;
+		// TR_ResolvedMethod* resolvedMethod = comp->fe()->createResolvedMethod(comp->trMemory(), method_block, 0);
+		// if (!resolvedMethod) {
+		// 	std::cout << "Could not resolve method" << std::endl;
+		// }
+      // else
+      // {
+
+		// int classNameLength = resolvedMethod->classNameLength();
+		// const char* className = resolvedMethod->classNameChars();
+		// int methodNameLength = resolvedMethod->nameLength();
+		// const char* methodName = resolvedMethod->nameChars();
+		// int signatureLength = resolvedMethod->signatureLength();
+		// const char* signature = resolvedMethod->signatureChars();
+
+    	// std::cout << std::string(className, classNameLength) 
+      //         << "." << std::string(methodName, methodNameLength)
+      //         << std::string(signature, signatureLength) << std::endl;
+      //   romMethod = nextROMMethod(romMethod);
+      // }
+
+   
+    }
+    return methodBlocks;
+}
 // TODO: move this someplace common for RuntimeAssumptions.cpp and here
 #if (defined(__IBMCPP__) || defined(__open_xl__)) && !defined(AIXPPC) && !defined(LINUXPPC)
 #define ASM_CALL __cdecl
@@ -548,7 +603,6 @@ TR_RelocationRecordGroup::handleRelocation(TR_RelocationRuntime *reloRuntime,
    {
    if (reloRuntime->reloLogger()->logEnabled())
       reloRecord->print(reloRuntime);
-
    switch (reloRecord->action(reloRuntime))
       {
       case TR_RelocationRecordAction::apply:
@@ -1071,6 +1125,65 @@ TR_RelocationRecord::applyRelocationAtAllOffsets(TR_RelocationRuntime *reloRunti
             if (rc != TR_RelocationErrorCode::relocationOK)
                {
                RELO_LOG(reloRuntime->reloLogger(), 6, "\tapplyRelocationAtAllOffsets: rc = %s\n", reloRuntime->getReloErrorCodeName(rc));
+               std::vector<TR_OpaqueMethodBlock*> modified_methods;
+               if(reloRuntime->comp()->getOption(TR_RunMyAnalysis))
+               {
+                  for(auto* modifiedClass : modified_ROMClass)
+                  {
+                     J9UTF8* className = J9ROMCLASS_CLASSNAME(modifiedClass);
+                     const char* classNameData = (const char*)J9UTF8_DATA(className);
+                     uint16_t classNameLength = J9UTF8_LENGTH(className);
+                     std::string class_name(classNameData, classNameLength);
+
+                     modified_methods =  getMethodBlocksForClass(class_name,reloRuntime->comp());
+                  }
+
+                  
+                  //Load the PAG
+                  std::string nodes = "nodes.txt";
+                  std::string edges = "PAGEdges.txt";
+                  std::string methods = "methods_to_PAGNodes.txt";
+                  std::string callgraph = "callgraph.txt";
+                  std::string threadAccess = "threadAccesible.txt";
+                  std::string staticFields = "staticFields.txt";
+
+                  LoadPAG loader(nodes, edges, methods, callgraph, threadAccess, staticFields);
+
+                  PointerAssignmentGraph *loaded_pag = loader.getPAG();
+
+                  recompilation_test rec_test;
+                  rec_test.reloRuntime = reloRuntime;
+                  TR::Compilation* comp = reloRuntime->comp();
+                  
+                  std::string mx_methodSignature = reloRuntime->currentResolvedMethod()->findOrCreateJittedMethodSymbol(comp)->signature(comp->trMemory());
+                  int mx = loaded_pag->_methodIndices[mx_methodSignature];
+
+                  //update the PAG
+                   PointerAssignmentGraph* updated_pag = loaded_pag;
+                  unordered_map<TR_OpaqueMethodBlock*,int> block_to_int;
+                  for(auto* modifed_method : modified_methods)
+                  {  
+                     std::string my_methodSignature = comp->getOwningMethodSymbol(modifed_method)->signature(comp->trMemory());
+                     int my = loaded_pag->_methodIndices[my_methodSignature];
+                     block_to_int[modifed_method] = my;
+                     updated_pag = rec_test.update_PAG(updated_pag,my,modifed_method,&(updated_pag->CG));
+                  }
+                 
+                  // test for each of the modified method 
+
+                  bool recompile = false;
+                  for(auto* modifed_method : modified_methods)
+                  {  
+                     recompile |= rec_test.should_recompile(mx,block_to_int[modifed_method],updated_pag,loaded_pag->getAllocEdges(mx),loaded_pag->getEscapingObjects(mx));
+                  }
+
+                  if(!recompile)
+                  {
+                     std::cout << "Need not to recompile " << mx_methodSignature << std::endl;
+                     return TR_RelocationErrorCode::relocationOK;
+                  }
+
+               }
                return rc;
                }
             }

@@ -44,7 +44,6 @@ j9jit_files(
 	runtime/RelocationRuntime.cpp
 	runtime/RelocationRuntimeLogger.cpp
 	runtime/RelocationTarget.cpp
-	runtime/RelocationTarget.cpp
 	runtime/RuntimeAssumptions.cpp
 	runtime/Runtime.cpp
 	runtime/SignalHandler.c
@@ -57,7 +56,12 @@ j9jit_files(
 # of the default list provided by create_omr_compiler_library
 j9jit_files(
 	${omr_SOURCE_DIR}/compiler/runtime/OMRRuntimeAssumptions.cpp
+	${omr_SOURCE_DIR}/compiler/optimizer/PAG/PointerAssignmentGraph.cpp
+	${omr_SOURCE_DIR}/compiler/optimizer/PAG/PAG_Components.cpp
+	${omr_SOURCE_DIR}/compiler/optimizer/PAG/CallGraph.cpp
+	${omr_SOURCE_DIR}/compiler/optimizer/PAG/regularPT.cpp
 )
+
 
 if(J9VM_OPT_JITSERVER)
 	j9jit_files(

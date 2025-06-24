@@ -35,8 +35,12 @@
 #include <string.h>
 #include <unordered_set>
 
-std::unordered_set<J9ROMClass*> modified_ROMClass;
+extern std::unordered_set<J9ROMClass*> modified_ROMClass;
 void listROMClassMethods(J9ROMClass *romClass);
+// std::unordered_set<J9ROMClass*>& getModifiedROMClassSet() 
+// {
+//     return modified_ROMClass;
+// }
 
 SH_ROMClassManagerImpl::SH_ROMClassManagerImpl()
  : _tsm(0),
@@ -516,6 +520,10 @@ SH_ROMClassManagerImpl::locateROMClass(J9VMThread* currentThread, const char* pa
 						match = wrapper;
 					}
 				}
+				if(pathLen == 4 || pathLen==6)
+				{
+					printf("PathLen= %d",pathLen);
+				}
 
 				/* At this point, we have our match - just need to check timestamp if .class file and look for shadows */
 				if (match) {
@@ -529,7 +537,7 @@ SH_ROMClassManagerImpl::locateROMClass(J9VMThread* currentThread, const char* pa
 							
 							J9ROMClass* locatedJ9ROMClass = (J9ROMClass*) _cache->getAddressFromJ9ShrOffset(&(match->romClassOffset));
 							// J9UTF8* className = J9ROMCLASS_CLASSNAME(locatedJ9ROMClass);
-							// printf("-----match Class name: %.*s-----\n", J9UTF8_LENGTH(className), J9UTF8_DATA(className));
+							// printf("-----match Class name: %.*s----- %d\n", J9UTF8_LENGTH(className), J9UTF8_DATA(className),pathLen);
 							// listROMClassMethods(locatedJ9ROMClass);
 							modified_ROMClass.insert(locatedJ9ROMClass);
 

@@ -64,6 +64,7 @@ target_link_libraries(j9shrcommon
 		j9hashtable
 		j9utilcore
 		j9util
+		j9jit
 )
 
 target_enable_ddr(j9shrcommon GLOB_HEADERS)
