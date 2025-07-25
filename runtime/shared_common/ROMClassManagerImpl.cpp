@@ -520,10 +520,10 @@ SH_ROMClassManagerImpl::locateROMClass(J9VMThread* currentThread, const char* pa
 						match = wrapper;
 					}
 				}
-				if(pathLen == 4 || pathLen==6)
-				{
-					printf("PathLen= %d",pathLen);
-				}
+				// if(pathLen == 4 || pathLen==6)
+				// {
+				// 	printf("PathLen= %d",pathLen);
+				// }
 
 				/* At this point, we have our match - just need to check timestamp if .class file and look for shadows */
 				if (match) {
@@ -538,7 +538,7 @@ SH_ROMClassManagerImpl::locateROMClass(J9VMThread* currentThread, const char* pa
 							J9ROMClass* locatedJ9ROMClass = (J9ROMClass*) _cache->getAddressFromJ9ShrOffset(&(match->romClassOffset));
 							// J9UTF8* className = J9ROMCLASS_CLASSNAME(locatedJ9ROMClass);
 							// printf("-----match Class name: %.*s----- %d\n", J9UTF8_LENGTH(className), J9UTF8_DATA(className),pathLen);
-							// listROMClassMethods(locatedJ9ROMClass);
+							// // listROMClassMethods(locatedJ9ROMClass);
 							modified_ROMClass.insert(locatedJ9ROMClass);
 
 							return (LOCATE_ROMCLASS_RETURN_MARKED_ITEM_STALE | LOCATE_ROMCLASS_RETURN_NOTFOUND);

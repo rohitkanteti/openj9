@@ -41,6 +41,7 @@ j9jit_files(
 	runtime/MetaDataDebug.cpp
 	runtime/MethodMetaData.c
 	runtime/RelocationRecord.cpp
+	runtime/Recompilation_test/operandStack.cpp
 	runtime/RelocationRuntime.cpp
 	runtime/RelocationRuntimeLogger.cpp
 	runtime/RelocationTarget.cpp
