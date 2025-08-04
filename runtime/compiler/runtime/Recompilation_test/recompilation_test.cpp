@@ -53,13 +53,13 @@ public:
 
         if (pag->_methodIndices.find(methodName) != pag->_methodIndices.end())
         {
-            std::cout << "Found in the method indices " << methodName  << std::endl;
+            std::cout << "Found in the method indices " << methodName << std::endl;
             return pag->_methodIndices[methodName];
         }
 
         int index = pag->_methodIndices.size() + 1;
         pag->_methodIndices[methodName] = index;
-        std::cout << "Inserted in the method indices " << methodName  << std::endl;
+        std::cout << "Inserted in the method indices " << methodName << std::endl;
 
         return index;
     }
@@ -397,7 +397,7 @@ public:
         std::unordered_map<int, PAGNode *> variableMap;
         std::string fullNAME = className + "." + name + signature;
         // Create entries in the varaible Map for each of the parameters and a PAGNode for return node ;
-        if (analysedMethodNames.find(fullNAME)==analysedMethodNames.end()) // This means that this method 'my' was not analyzed before or called before.
+        if (analysedMethodNames.find(fullNAME) == analysedMethodNames.end()) // This means that this method 'my' was not analyzed before or called before.
         {
             for (int i = 0; i < num_params; i++)
             {
@@ -407,7 +407,7 @@ public:
                 pag->PAG_nodes.insert(param_node_ptr);
                 pag->methodIndex_to_formalNodes[methodIndex].push_back(param_node_ptr);
             }
-             if (hasReturnType)
+            if (hasReturnType)
             {
                 pag->methods_to_returnNode[methodIndex] = new PAGNode(RETURN, RETURN_NODE_NAME, NULL, method_block, -1, methodIndex);
                 pag->PAG_nodes.insert(pag->methods_to_returnNode[methodIndex]);
@@ -1519,12 +1519,25 @@ public:
             break;
         }
 
-        // load an int from an array
-        case J9BCiaload:
+        case J9BCiaload: // load an int from an array
         case J9BClaload:
         case J9BCfaload:
         case J9BCdaload:
-        case J9BCaaload:
+            break;
+
+        case J9BCaaload: // load a refernce from an array
+        {
+            PAGNode *arrayref = stack->popRef();
+
+            PAGNode *temp_node_ptr = new PAGNode(VARIABLE, globalIndex, nullptr, method_block, bci, methodIndex);
+            pag->PAG_nodes.insert(temp_node_ptr);
+            pag->methods_to_allMethodNodes[methodIndex].push_back(temp_node_ptr);
+            pag->addEdge(arrayref, temp_node_ptr, GETFIELD, "$");
+
+            stack->pushRef(temp_node_ptr);
+            break;
+        }
+
         case J9BCbaload:
         case J9BCcaload:
         case J9BCsaload:
@@ -1615,7 +1628,21 @@ public:
             break;
         // store a reference in an array
         case J9BCaastore:
+        {
+            PAGNode* value = stack->popRef();
+            PAGNode* arrayRef = stack->popRef();
+
+            
+            pag->addEdge(value, arrayRef, PUTFIELD, "$");
+
+            // if (pag->threadAccessibleFields.find(fullName) != pag->threadAccessibleFields.end())
+            // {
+            //     pag->LeakyNodes.insert(value);
+            // }
+            updateMatchEdges(pag);
+
             break;
+        }
         case J9BCbastore:
             break;
         case J9BCcastore:
@@ -2076,6 +2103,7 @@ public:
             break;
         }
 
+        case J9BCanewarray:
         case J9BCnew:
         {
             uint32_t classNamelength = 0;
@@ -2092,8 +2120,6 @@ public:
             obj_ptr->pointee_class_names.insert(className);
             break;
         }
-        case J9BCanewarray:
-            break;
 
         case J9BCcheckcast:
             break;
