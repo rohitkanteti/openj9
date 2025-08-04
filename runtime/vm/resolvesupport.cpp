@@ -304,7 +304,6 @@ tryAgain:
 	classNameWrapper = J9ROMSTRINGREF_UTF8DATA(romStringRef);
 	classNameLength = J9UTF8_LENGTH(classNameWrapper);
 	classNameData = J9UTF8_DATA(classNameWrapper);
-
 	currentClass = J9_CLASS_FROM_CP(ramCP);
 	classLoader = currentClass->classLoader;
 	if (NULL == classLoader) {

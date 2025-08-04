@@ -74,16 +74,17 @@ extern std::string getMethodName(TR::ResolvedMethodSymbol *m);
 #define CAN_BE_REUSED true
 #define NEED_TO_RECOMPILE false
 
-std::vector< J9Method *> getJ9MethodsOfClass(const std::string &class_name, TR::Compilation *comp);
+std::vector<J9Method *> getJ9MethodsOfClass(const std::string &class_name, TR::Compilation *comp);
+extern void writeNodesToFile(TR::Compilation *comp, PointerAssignmentGraph *pag);
 static bool PAGupdated = false;
-static  PointerAssignmentGraph *updated_pag;
+static PointerAssignmentGraph *updated_pag;
 extern std::unordered_set<std::string> changedMethodNames;
 bool testIfCanBeReUsed(TR_RelocationRuntime *reloRuntime)
 {
    std::vector<J9Method *> modified_methods;
    if (modified_ROMClass.size() <= 0)
       return CAN_BE_REUSED;
-      
+
    for (auto *modifiedClass : modified_ROMClass)
    {
       J9UTF8 *className = J9ROMCLASS_CLASSNAME(modifiedClass);
@@ -105,6 +106,8 @@ bool testIfCanBeReUsed(TR_RelocationRuntime *reloRuntime)
    LoadPAG loader(nodes, edges, methods, callgraph, threadAccess, staticFields);
 
    PointerAssignmentGraph *loaded_pag = loader.getPAG();
+
+   // writeNodesToFile(reloRuntime->comp(),loaded_pag);
 
    recompilation_test rec_test;
    rec_test.reloRuntime = reloRuntime;
@@ -129,10 +132,12 @@ bool testIfCanBeReUsed(TR_RelocationRuntime *reloRuntime)
 
    std::string mx_methodSignature = classNameStr + "." + name + signature; // reloRuntime->currentResolvedMethod()->findOrCreateJittedMethodSymbol(comp)->signature(comp->trMemory());
    int mx = loaded_pag->_methodIndices[mx_methodSignature];
-
+   unordered_set<PAGEdge *> allocs = loaded_pag->getAllocEdges(mx);
+   unordered_set<PAGNode *> escapes = loaded_pag->getEscapingObjects(mx);
    // update the PAG
-   if(!PAGupdated)
-   {  
+   if (!PAGupdated)
+   {
+
       PAGupdated = true;
       updated_pag = loaded_pag;
       unordered_map<TR_OpaqueMethodBlock *, int> block_to_int;
@@ -140,9 +145,9 @@ bool testIfCanBeReUsed(TR_RelocationRuntime *reloRuntime)
       {
          TR_OpaqueMethodBlock *method_block = reinterpret_cast<TR_OpaqueMethodBlock *>(modifed_method);
          resolvedMethod = comp->fe()->createResolvedMethod(
-            comp->trMemory(),
-            method_block,
-            comp->getCurrentMethod());
+             comp->trMemory(),
+             method_block,
+             comp->getCurrentMethod());
          methodName = resolvedMethod->nameChars();
          methodNameLength = resolvedMethod->nameLength();
          methodSignature = resolvedMethod->signatureChars();
@@ -161,7 +166,10 @@ bool testIfCanBeReUsed(TR_RelocationRuntime *reloRuntime)
          std::string cNameStr(cName, cNameLength);
 
          std::string my_methodSignature = cNameStr + "." + Mname + Msignature;
-         std::cout << my_methodSignature << std::endl;
+         std::cout << " my_methodSignature = " << my_methodSignature << std::endl;
+         
+         if (loaded_pag->_methodIndices.find(my_methodSignature) == loaded_pag->_methodIndices.end()) // This means that this method my was not analyzed before or called before.
+            continue;
 
          int my = loaded_pag->_methodIndices[my_methodSignature];
          block_to_int[method_block] = my;
@@ -170,17 +178,20 @@ bool testIfCanBeReUsed(TR_RelocationRuntime *reloRuntime)
    }
    // test for each of the modified method
 
-   bool recompile = rec_test.should_recompile(mx, updated_pag, loaded_pag->getAllocEdges(mx), loaded_pag->getEscapingObjects(mx));
+   bool recompile = rec_test.should_recompile(mx, updated_pag, allocs, escapes);
 
    if (recompile)
+   {
+      std::cout << "Need to recompile: " << reloRuntime->comp()->signature() << std::endl;
       return NEED_TO_RECOMPILE;
+   }
 
    return CAN_BE_REUSED;
 }
 
-std::vector< J9Method *> getJ9MethodsOfClass(const std::string &class_name, TR::Compilation *comp)
+std::vector<J9Method *> getJ9MethodsOfClass(const std::string &class_name, TR::Compilation *comp)
 {
-   std::vector< J9Method *> j9Methods;
+   std::vector<J9Method *> j9Methods;
 
    TR_J9VMBase *fej9 = (TR_J9VMBase *)comp->fe();
    TR_OpaqueClassBlock *clazz = fej9->getClassFromSignature(class_name.c_str(), class_name.length(), comp->getCurrentMethod());
@@ -203,21 +214,21 @@ std::vector< J9Method *> getJ9MethodsOfClass(const std::string &class_name, TR::
       J9Method *ramMethod = &j9Class->ramMethods[i];
       j9Methods.push_back(ramMethod);
       // std::cout << "Method added is: " ;
-      TR_OpaqueMethodBlock* method_block = reinterpret_cast<TR_OpaqueMethodBlock*>(ramMethod);
-      TR_ResolvedMethod* resolvedMethod = comp->fe()->createResolvedMethod(comp->trMemory(), method_block, 0);
+      TR_OpaqueMethodBlock *method_block = reinterpret_cast<TR_OpaqueMethodBlock *>(ramMethod);
+      TR_ResolvedMethod *resolvedMethod = comp->fe()->createResolvedMethod(comp->trMemory(), method_block, 0);
       // if (!resolvedMethod) {
       // 	std::cout << "Could not resolve method" << std::endl;
       // }
       // else
       // {
 
-      // int classNameLength = resolvedMethod->classNameLength();
-      // const char* className = resolvedMethod->classNameChars();
+      int classNameLength = resolvedMethod->classNameLength();
+      const char *className = resolvedMethod->classNameChars();
       int methodNameLength = resolvedMethod->nameLength();
-      const char* methodName = resolvedMethod->nameChars();
+      const char *methodName = resolvedMethod->nameChars();
       int signatureLength = resolvedMethod->signatureLength();
-      const char* signature = resolvedMethod->signatureChars();
-      std::string full_name = std::string(methodName, methodNameLength) + std::string(signature, signatureLength);
+      const char *signature = resolvedMethod->signatureChars();
+      std::string full_name = std::string(className, classNameLength) + "." + std::string(methodName, methodNameLength) + std::string(signature, signatureLength);
 
       changedMethodNames.insert(full_name);
       // std::cout << std::string(className, classNameLength)
@@ -694,7 +705,7 @@ TR_RelocationRecordGroup::applyRelocations(TR_RelocationRuntime *reloRuntime,
          aotStats->numRelocationsFailedByType[reloType]++;
          if (reloRuntime->comp()->getOption(TR_RunMyAnalysis))
          {
-            bool reuse =  testIfCanBeReUsed(reloRuntime);
+            bool reuse = testIfCanBeReUsed(reloRuntime);
 
             if (reuse == CAN_BE_REUSED)
             {
@@ -714,8 +725,8 @@ TR_RelocationRecordGroup::applyRelocations(TR_RelocationRuntime *reloRuntime,
                int32_t classNameLength = J9UTF8_LENGTH(classNameUTF8);
 
                std::string classNameStr(className, classNameLength);
-               
-               std::cout << "1. Need not to recompile and can be reused " << className << "." << name << signature <<std::endl; //<< reloRuntime->currentResolvedMethod()->findOrCreateJittedMethodSymbol(comp)->signature(comp->trMemory()) << std::endl;
+
+               std::cout << "1. Need not to recompile and can be reused " << className << "." << name << signature << std::endl; //<< reloRuntime->currentResolvedMethod()->findOrCreateJittedMethodSymbol(comp)->signature(comp->trMemory()) << std::endl;
                // return TR_RelocationErrorCode::relocationOK;
                goto OK;
             }

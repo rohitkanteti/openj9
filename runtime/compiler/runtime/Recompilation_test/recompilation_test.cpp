@@ -19,6 +19,8 @@
 #include "operandStack.hpp"
 #include <string.h>
 #include <fstream>
+#include "env/VMAccessCriticalSection.hpp"
+#include "../../../../../omr/gc/structs/PoolIterator.hpp"
 
 #define STATIC_FIELD_READ -10866 // unique negative code for static field read.
 #define RETURN_NODE_NAME -56765  // UNIQUE NAME for return node
@@ -27,7 +29,15 @@ int globalIndex = 0;
 extern TR_ResolvedMethod *getCachedResolvedMethodFromPtr(TR::Compilation *comp, TR_OpaqueMethodBlock *methodPtr);
 extern bool returnsObject(const std::string &methodSignature);
 extern bool isLibraryMethod(std::string methodName);
+extern std::unordered_set<std::string> getClassFields(J9Class *clazz, J9VMThread *vmThread);
 static std::unordered_set<std::string> analysedMethodNames;
+static unordered_set<std::string> threadExtendingClasses;
+static std::unordered_map<std::string, std::unordered_set<std::string>> className_to_fields;
+
+static std::__1::unordered_map<std::string, PAGNode *> class_to_staticPAGNode;
+
+static unordered_set<std::string> all_loaded_classes;
+static bool threadClassesIdentified = false;
 std::unordered_set<std::string> changedMethodNames;
 
 PointerAssignmentGraph *pag_to_use = nullptr;
@@ -36,6 +46,23 @@ class recompilation_test
 public:
     TR_RelocationRuntime *reloRuntime;
 
+    int getOrInsertMethodIndex(std::string methodName, PointerAssignmentGraph *pag)
+    {
+        // TR_OpaqueMethodBlock *methodPersistentId = methodSymbol->getResolvedMethod()->getPersistentIdentifier();
+        // // no need of assert, guaranteed to be available
+
+        if (pag->_methodIndices.find(methodName) != pag->_methodIndices.end())
+        {
+            std::cout << "Found in the method indices " << methodName  << std::endl;
+            return pag->_methodIndices[methodName];
+        }
+
+        int index = pag->_methodIndices.size() + 1;
+        pag->_methodIndices[methodName] = index;
+        std::cout << "Inserted in the method indices " << methodName  << std::endl;
+
+        return index;
+    }
     // boolean should_recompile(Method mx,Method,PAG p_prime,PAG p)
     bool should_recompile(int mx, PointerAssignmentGraph *p_prime, unordered_set<PAGEdge *> old_allocated_edges, unordered_set<PAGNode *> old_escaping_objects)
     {
@@ -84,76 +111,72 @@ public:
         return false; // No recompilation needed
     }
 
-    PointerAssignmentGraph *update_PAG(PointerAssignmentGraph *p, int my, J9Method *my_prime_methodBlock, CallGraph *CG)
+    PointerAssignmentGraph *update_PAG(PointerAssignmentGraph *p, int my, J9Method *my_prime_J9Method, CallGraph *CG)
     {
 
+        std::cout << "The index my is = " << my << std::endl;
         if (analysedMethodNames.empty())
         {
             getAnalyzedMethods();
         }
-        // remove interprocedural edges [All the edges to formal params are `assign` edges]
+        if (all_loaded_classes.empty())
+        {
+            getall_loaded_classes(reloRuntime->comp());
+        }
+        if (!threadClassesIdentified)
+        {
+            threadClassesIdentified = true;
+            getThreadRelatedClasses(reloRuntime->comp());
+        }
+        // remove intraprocedural edges [All the edges to formal params are `assign` edges]
         for (PAGNode *f_param : p->getFormalParameterNodes(my))
         {
             p->removeAllEdgesFrom(f_param);
         }
 
-        for (int caller : CG->getCallers(my))
-        {
-            for (auto cs : CG->getCallSites(caller, my))
-            {
-                // std::cout << "caller= "<<caller<<"cs= "<< cs << std::endl;
-                PAGNode *ret_my = p->getReturnNode(my);
-                if (ret_my != NULL)
-                {
-                    // remove edge from the x labelled by the callsite cs
-                    PAGNode *x = p->nodeIndexToNode[p->callsite_to_storeNodeIndex[cs]];
-                    std::cout << x << std::endl;
-                    TR_ASSERT_FATAL(x, "x has gone null");
-                    p->removeEdgeFrom(x, cs);
-                    p->removeAllEdgesFrom(ret_my);
-                }
-                for (PAGNode *a_param : p->getActualParameterNodes(my, cs))
-                {
-                    // remove edge from the actual paramter labelled by the callsite cs
-                    p->removeEdgeFrom(a_param, cs);
-                }
-            }
-        }
+        // for (int caller : CG->getCallers(my))
+        // {
+        //     for (auto cs : CG->getCallSites(caller, my))
+        //     {
+        //         std::cout << "caller= " << caller << "cs= " << cs << std::endl;
 
-        // remove match edges
-        for (PAGEdge *e1 : p->getStoreEdges(my))
-        {
-            for (PAGEdge *e2 : p->getLoadEdges(my))
-            {
-                if (e1->field == e2->field)
-                {
-                    p->removeEdgeFrom(e1->src, MATCH);
-                    p->removeEdgeFrom(e2->dest, MATCH_BAR);
-                }
-            }
-        }
+        //         PAGNode *ret_my = p->getReturnNode(my);
+        //         if (ret_my != NULL)
+        //         {
+        //             // remove edge from the x labelled by the callsite cs
+        //             int nodeIndex = p->callsite_to_storeNodeIndex[cs];
+        //             PAGNode *x = p->nodeIndexToNode[nodeIndex];
+        //             std::cout << x << std::endl;
+        //             if (x)
+        //             {
+        //                 p->removeEdgeFrom(x, cs); // check this !!
+        //             }
+        //             p->removeAllEdgesFrom(ret_my);
+        //         }
+        //         for (PAGNode *a_param : p->getActualParameterNodes(my, cs))
+        //         {
+        //             // remove edge from the actual paramter labelled by the callsite cs
+        //             p->removeEdgeFrom(a_param, cs);
+        //         }
+        //     }
+        // }
+
+        // remove match edges -- UPDATED TO REMOVE ALL INTRAPROCEDURAL EDGES IN ONE METHOD
+        // for (PAGEdge *e1 : p->getStoreEdges(my))
+        // {
+        //     for (PAGEdge *e2 : p->getLoadEdges(my))
+        //     {
+        //         if (e1->field == e2->field)
+        //         {
+        //             p->removeEdgeFrom(e1->src, MATCH);
+        //             p->removeEdgeFrom(e2->dest, MATCH_BAR);
+        //         }
+        //     }
+        // }
 
         // remove intraprocedural edges
         // Assume remove call will remove both edges labelled by k and k_bar
-        for (PAGEdge *e : p->getIntraproceduralAssignEdges(my))
-            p->removeEdge(e);
-        for (PAGEdge *e : p->getAllocEdges(my))
-            p->removeEdge(e);
-
-        for (PAGEdge *e : p->getStoreEdges(my))
-        {
-            // f is  field or field of a class extending Thread or implementing Runnable,
-            // then remove x from the leaky nodes set
-            if (isStaticField(e->field, p) || isThreadClassField(e->field, p))
-            {
-                p->LeakyNodes.erase(e->src);
-            }
-            p->removeEdge(e);
-        }
-
-        for (PAGEdge *e : p->getLoadEdges(my))
-            p->removeEdge(e);
-
+        p->removeEdges(my); // This will remove all the edges that are having a source as a node created in my
         p->removeNodes(my);
 
         // add intraprocedural edges
@@ -163,30 +186,12 @@ public:
         // use computeMSetForMethod(TR::Compilation *comp, TR::ResolvedMethodSymbol *methodSymbol)
         // computeMsetForMethod call will create all the nodes for actual/formal and return nodes and also add the edges(both intra/inter)
         TR::Compilation *comp = reloRuntime->comp();
-        TR_ASSERT_FATAL(comp->trMemory(), "TrMemory is null");
-        // TR::ResolvedMethodSymbol *methodSymbol =
-        // Get TR_OpaqueMethodBlock* from method index
-        // TR_OpaqueMethodBlock* methodBlock = nullptr;
-        // for (auto& entry : _methodIndicesPtr) {
-        //     if (entry.second == my) {
-        //         methodBlock = entry.first;
-        //         break;
-        //     }
-        // }
-        // if (!methodBlock) {
-        //     return;
-        // }
-        TR_OpaqueMethodBlock *method_block = reinterpret_cast<TR_OpaqueMethodBlock *>(my_prime_methodBlock);
-        TR_ResolvedMethod *resolvedMethod = getCachedResolvedMethodFromPtr(comp, method_block);
-        //    TR::ResolvedMethodSymbol methodSymbolObj(resolvedMethod, comp);
-        //    TR::ResolvedMethodSymbol *methodSymbol = &methodSymbolObj;
 
-        pag_to_use = p;
-        // printMethodBytecodeStatements(my_prime_methodBlock, resolvedMethod, comp);
+        // printMethodBytecodeStatements(my_prime_J9Method, resolvedMethod, comp);
 
         // the method index for my and my' must be the same.
 
-        traverse_bytecode(my_prime_methodBlock, resolvedMethod, p, my, reloRuntime->comp());
+        traverse_bytecode(my_prime_J9Method, p, my, reloRuntime->comp());
 
         // J9JavaVM* vm = reloRuntime->javaVM();
         // if(vm)
@@ -197,7 +202,7 @@ public:
         //           TR::CompilationInfo * compInfo = getCompilationInfo(jitConfig);
         //           if(compInfo)
         //           {
-        //             J9Method *ramMethod = reinterpret_cast<J9Method*>(my_prime_methodBlock);
+        //             J9Method *ramMethod = reinterpret_cast<J9Method*>(my_prime_J9Method);
         //             J9ROMMethod *romMethod = J9_ROM_METHOD_FROM_RAM_METHOD(ramMethod);
 
         //             if (!(romMethod->modifiers & (J9AccAbstract | J9AccNative)))
@@ -249,16 +254,16 @@ public:
         // }
 
         // add match edges
-        for (PAGEdge *e1 : p->getStoreEdges(my))
-        {
-            for (PAGEdge *e2 : p->getLoadEdges(my))
-            {
-                if (e1->field == e2->field)
-                {
-                    p->addEdge(e1->src, e2->dest, MATCH);
-                }
-            }
-        }
+        // for (PAGEdge *e1 : p->getStoreEdges(my))
+        // {
+        //     for (PAGEdge *e2 : p->getLoadEdges(my))
+        //     {
+        //         if (e1->field == e2->field)
+        //         {
+        //             p->addEdge(e1->src, e2->dest, MATCH);
+        //         }
+        //     }
+        // }
 
         return p;
     }
@@ -366,12 +371,16 @@ public:
         return false;
     }
 
-    void traverse_bytecode(J9Method *method, TR_ResolvedMethod *resolvedMethod, PointerAssignmentGraph *pag, int methodIndex, TR::Compilation *comp)
+    void traverse_bytecode(J9Method *method, PointerAssignmentGraph *pag, int methodIndex, TR::Compilation *comp)
     {
 
         TR_OpaqueMethodBlock *method_block = reinterpret_cast<TR_OpaqueMethodBlock *>(method);
         int32_t methodSize = TR::Compiler->mtd.bytecodeSize(method_block);
         uintptr_t methodStart = TR::Compiler->mtd.bytecodeStart(method_block);
+        TR_ResolvedMethod *resolvedMethod = getCachedResolvedMethodFromPtr(comp, method_block);
+
+        char *classNameChars = resolvedMethod->classNameChars();
+        int32_t classNameLength = resolvedMethod->classNameLength();
 
         char *methodName = resolvedMethod->nameChars();
         int32_t methodNameLength = resolvedMethod->nameLength();
@@ -379,26 +388,60 @@ public:
         int32_t methodSignatureLength = resolvedMethod->signatureLength();
 
         std::string name(methodName, methodNameLength);
+        std::string className(classNameChars, classNameLength);
         std::string signature(methodSignature, methodSignatureLength);
 
         bool hasReturnType = returnsObject(methodSignature);
+        std::cout << "############## Traversing the Bytecode of the method " << className << "." << name << signature << "##############" << std::endl;
         int num_params = resolvedMethod->numberOfParameterSlots();
         std::unordered_map<int, PAGNode *> variableMap;
+        std::string fullNAME = className + "." + name + signature;
         // Create entries in the varaible Map for each of the parameters and a PAGNode for return node ;
+        if (analysedMethodNames.find(fullNAME)==analysedMethodNames.end()) // This means that this method 'my' was not analyzed before or called before.
+        {
+            for (int i = 0; i < num_params; i++)
+            {
+                PAGNode *param_node_ptr = new PAGNode(VARIABLE, i, nullptr, method_block, -1, methodIndex);
+                std::cout << "Method index = " << methodIndex << std::endl;
+                pag->methodIndex_to_allMethodNodes[methodIndex].push_back(param_node_ptr);
+                pag->PAG_nodes.insert(param_node_ptr);
+                pag->methodIndex_to_formalNodes[methodIndex].push_back(param_node_ptr);
+            }
+             if (hasReturnType)
+            {
+                pag->methods_to_returnNode[methodIndex] = new PAGNode(RETURN, RETURN_NODE_NAME, NULL, method_block, -1, methodIndex);
+                pag->PAG_nodes.insert(pag->methods_to_returnNode[methodIndex]);
+                pag->methodIndex_to_allMethodNodes[methodIndex].push_back(pag->methods_to_returnNode[methodIndex]);
+            }
+        }
+        vector<PAGNode *> formal_param_nodes = pag->methodIndex_to_formalNodes[methodIndex];
+        PAGNode *returnNode = nullptr;
+        auto it = pag->methodIndex_to_returnNode.find(methodIndex);
+        if (it != pag->methodIndex_to_returnNode.end())
+        {
+            returnNode = it->second;
+        }
+
+        std::cout << "Formal params size = " << formal_param_nodes.size() << std::endl;
+        if (num_params != formal_param_nodes.size() || ((hasReturnType && !returnNode) || (!hasReturnType && returnNode)))
+        {
+            throw std::runtime_error("There is a mismatch in the size of paramters maybe the method signature changed.");
+        }
+
         for (int i = 0; i < num_params; i++)
         {
-            PAGNode *param_node_ptr = new PAGNode(VARIABLE, i, nullptr, method_block, -1, methodIndex);
-            pag->methods_to_allMethodNodes[methodIndex].push_back(param_node_ptr);
-            pag->PAG_nodes.insert(param_node_ptr);
-            pag->methods_to_formalNodes[methodIndex].push_back(param_node_ptr);
+            // PAGNode *param_node_ptr = new PAGNode(VARIABLE, i, nullptr, method_block, -1, methodIndex);
+            // pag->methods_to_allMethodNodes[methodIndex].push_back(param_node_ptr);
+            // pag->PAG_nodes.insert(param_node_ptr);
+            // pag->methods_to_formalNodes[methodIndex].push_back(param_node_ptr);
 
-            variableMap[i] = param_node_ptr;
+            variableMap[i] = formal_param_nodes[i];
         }
         if (hasReturnType)
         {
-            pag->methods_to_returnNode[methodIndex] = new PAGNode(RETURN, RETURN_NODE_NAME, NULL, method_block, -1, methodIndex);
-            pag->PAG_nodes.insert(pag->methods_to_returnNode[methodIndex]);
-            pag->methods_to_allMethodNodes[methodIndex].push_back(pag->methods_to_returnNode[methodIndex]);
+            // pag->methods_to_returnNode[methodIndex] = new PAGNode(RETURN, RETURN_NODE_NAME, NULL, method_block, -1, methodIndex);
+            // pag->PAG_nodes.insert(pag->methods_to_returnNode[methodIndex]);
+            // pag->methods_to_allMethodNodes[methodIndex].push_back(pag->methods_to_returnNode[methodIndex]);
         }
 
         int32_t currentIndex = 0;
@@ -412,10 +455,10 @@ public:
             uint8_t *pc = (uint8_t *)(methodStart + currentIndex);
 
             TR_J9ByteCode bytecode = TR_J9ByteCodeIterator::convertOpCodeToByteCodeEnum(*pc);
-
+            int32_t instructionLength = getInstructionLength(bytecode, pc);
             std::cout << "  [" << statementCount << "] PC: " << currentIndex
                       << " - Opcode: 0x" << std::hex << (int)(*pc) << std::dec
-                      << " - " << getBytecodeString(bytecode) << std::endl;
+                      << " - " << getBytecodeString(bytecode) << " ---> " << instructionLength << std::endl;
 
             executeBytecode(bytecode, pc, pag, stack, resolvedMethod, method, methodIndex, currentIndex, variableMap, hasReturnType, comp);
 
@@ -450,11 +493,17 @@ public:
             // }
             // std::cout << std::endl;
 
-            int32_t instructionLength = getInstructionLength(bytecode, pc);
             currentIndex += instructionLength;
             globalIndex++;
             statementCount++;
         }
+
+        std::string fully_qualified_name = className + "." + name + signature;
+        if (changedMethodNames.find(fully_qualified_name) != changedMethodNames.end())
+        {
+            changedMethodNames.erase(fully_qualified_name);
+        }
+        analysedMethodNames.insert(fully_qualified_name);
     }
 
     void printMethodBytecodeStatements(TR_OpaqueMethodBlock *method, TR_ResolvedMethod *resolvedMethod, TR::Compilation *comp)
@@ -509,7 +558,7 @@ public:
                 J9ConstantPool *cp = J9_CP_FROM_METHOD(reinterpret_cast<J9Method *>(resolvedMethod));
 
                 J9ROMMethodRef *romMethodRef = (J9ROMMethodRef *)(cp->romConstantPool + cpIndex);
-                std::cout << romMethodRef << std::endl;
+                // std::cout << romMethodRef << std::endl;
                 J9ROMNameAndSignature *nameAndSig = J9ROMMETHODREF_NAMEANDSIGNATURE(romMethodRef); //(J9ROMNameAndSignature*) romMethodRef->nameAndSignature;
 
                 //((struct J9ROMNameAndSignature*) (((uint8_t *) &((romMethodRef)->nameAndSignature)) + (J9SRP)((romMethodRef)->nameAndSignature)));//J9ROMMETHODREF_NAMEANDSIGNATURE(romMethodRef);
@@ -1053,11 +1102,68 @@ public:
         }
     }
 
+#include <stdint.h>
+    static int32_t read_int32(uint8_t **pc_ptr)
+    {
+        int32_t val = ((*pc_ptr)[0] << 24) | ((*pc_ptr)[1] << 16) | ((*pc_ptr)[2] << 8) | (*pc_ptr)[3];
+        *pc_ptr += 4;
+        return val;
+    }
+    int32_t calculateTableswitchLength(uint8_t *pc)
+    {
+        uint8_t *current_pc = pc + 1;
+        int32_t padding = (4 - ((intptr_t)pc + 1) % 4) % 4;
+        current_pc += padding;
+        int32_t default_offset = read_int32(&current_pc);
+        int32_t low = read_int32(&current_pc);
+        int32_t high = read_int32(&current_pc);
+        int32_t num_jumps = high - low + 1;
+        current_pc += (num_jumps * 4);
+        return (int32_t)(current_pc - pc);
+    }
+    int32_t calculateLookupswitchLength(uint8_t *pc)
+    {
+        uint8_t *current_pc = pc + 1;
+        int32_t padding = (4 - ((intptr_t)pc + 1) % 4) % 4;
+        current_pc += padding;
+        int32_t default_offset = read_int32(&current_pc);
+        int32_t npairs = read_int32(&current_pc);
+        current_pc += (npairs * 8);
+        return (int32_t)(current_pc - pc);
+    }
+    int32_t calculateWideInstructionLength(uint8_t *pc)
+    {
+        TR_J9ByteCode modified_opcode = (TR_J9ByteCode) * (pc + 1);
+        int32_t length = 1;
+        switch (modified_opcode)
+        {
+        case J9BCiload:
+        case J9BClload:
+        case J9BCfload:
+        case J9BCdload:
+        case J9BCaload:
+        case J9BCistore:
+        case J9BClstore:
+        case J9BCfstore:
+        case J9BCdstore:
+        case J9BCastore:
+            length += 1;
+            length += 2;
+            break;
+        case J9BCiinc:
+            length += 1;
+            length += 2;
+            length += 2;
+            break;
+        default:
+            return -1;
+        }
+        return length;
+    }
     int32_t getInstructionLength(TR_J9ByteCode bytecode, uint8_t *pc)
     {
         switch (bytecode)
         {
-        // Single-byte instructions
         case J9BCnop:
         case J9BCaconstnull:
         case J9BCiconstm1:
@@ -1196,37 +1302,35 @@ public:
         case J9BCdcmpl:
         case J9BCdcmpg:
         case J9BCgenericReturn:
-        case J9BCarraylength:
-        case J9BCathrow:
-        case J9BCmonitorenter:
-        case J9BCmonitorexit:
         case J9BCReturnC:
         case J9BCReturnS:
         case J9BCReturnB:
         case J9BCReturnZ:
+        case J9BCarraylength:
+        case J9BCathrow:
+        case J9BCmonitorenter:
+        case J9BCmonitorexit:
         case J9BCasyncCheck:
         case J9BCbreakpoint:
             return 1;
-
-        // Two-byte instructions (opcode + 1 byte operand)
         case J9BCbipush:
         case J9BCnewarray:
-            return 2;
-
-        // Three-byte instructions (opcode + 2 byte operands)
-        case J9BCsipush:
+        case J9BCaload:
+        case J9BCldc:
         case J9BCiload:
         case J9BClload:
         case J9BCfload:
         case J9BCdload:
-        case J9BCaload:
         case J9BCistore:
         case J9BClstore:
         case J9BCfstore:
         case J9BCdstore:
         case J9BCastore:
-        case J9BCldc:
+            return 2;
+        case J9BCsipush:
         case J9BCldcw:
+        case J9BCldc2lw:
+        case J9BCldc2dw:
         case J9BCifeq:
         case J9BCifne:
         case J9BCiflt:
@@ -1256,32 +1360,21 @@ public:
         case J9BCcheckcast:
         case J9BCinstanceof:
         case J9BCiinc:
-        case J9BCldc2lw:
-        case J9BCldc2dw:
             return 3;
-
-        // Four-byte instructions
         case J9BCmultianewarray:
             return 4;
-
-        // Five-byte instructions
         case J9BCinvokeinterface:
         case J9BCinvokedynamic:
         case J9BCgotow:
             return 5;
-
-        // Variable length instructions - need special handling
         case J9BCtableswitch:
-            // case J9BClookupswitch:
-            //     // These require parsing the actual instruction data
-            //     return calculateVariableLengthInstruction(bytecode, pc);
-
-            // // Wide instructions - depend on the following instruction
-            // case J9BCwide:
-            //     return calculateWideInstructionLength(pc);
-
+            return calculateTableswitchLength(pc);
+        case J9BClookupswitch:
+            return calculateLookupswitchLength(pc);
+        case J9BCwide:
+            return calculateWideInstructionLength(pc);
         default:
-            return 1; // Safe fallback
+            return -1;
         }
     }
 
@@ -1313,6 +1406,7 @@ public:
 
         TR_OpaqueMethodBlock *method_block = reinterpret_cast<TR_OpaqueMethodBlock *>(currentMethod);
         uint16_t cpIndex = (pc[2] << 8) | pc[1];
+
         switch (bytecode)
         {
 
@@ -1624,7 +1718,8 @@ public:
             {
 
                 PAGNode *obj_ref = stack->popRef();
-                PAGNode *return_pag_node_ptr = pag->methods_to_returnNode[methodIndex];
+                PAGNode *return_pag_node_ptr = pag->methodIndex_to_returnNode[methodIndex];
+                std::cout << methodIndex << " " << return_pag_node_ptr << std::endl;
                 pag->addEdge(obj_ref, return_pag_node_ptr, ASSIGN);
 
                 return_pag_node_ptr->pointee_class_names.insert(obj_ref->pointee_class_names.begin(), obj_ref->pointee_class_names.end());
@@ -1646,17 +1741,24 @@ public:
         case J9BCbreakpoint:
             break;
 
-        // Two-byte instructions (opcode + 1 byte operand)
         case J9BCbipush:
         case J9BCnewarray:
+        {
+        }
 
-        // Three-byte instructions (opcode + 2 byte operands)
         case J9BCsipush:
         case J9BCiload:
         case J9BClload:
         case J9BCfload:
         case J9BCdload:
+            break;
         case J9BCaload:
+        {
+            int index = pc[1];
+            PAGNode *ref = variableMap[index];
+            stack->pushRef(ref);
+            break;
+        }
         case J9BCistore:
         case J9BClstore:
         case J9BCfstore:
@@ -1667,6 +1769,7 @@ public:
         {
             PAGNode *obj_ref = stack->popRef();
             int index = pc[1];
+            std::cout << " " << index;
             if (!variableMap[index])
             {
                 variableMap[index] = new PAGNode(VARIABLE, globalIndex, nullptr, method_block, bci, methodIndex);
@@ -1704,65 +1807,130 @@ public:
             break;
 
         case J9BCgetstatic:
-        case J9BCputstatic:
-            break;
         case J9BCgetfield:
         {
 
+            J9ConstantPool *cp = J9_CP_FROM_METHOD(currentMethod);
+            J9ROMMethodRef *romMethodRef = (J9ROMMethodRef *)(cp->romConstantPool + cpIndex);
+            U_32 classRefIndex = romMethodRef->classRefCPIndex;
+            J9ROMStringRef *romStringRef = (J9ROMStringRef *)&cp->romConstantPool[classRefIndex];
+            J9UTF8 *classNameWrapper = J9ROMSTRINGREF_UTF8DATA(romStringRef);
+            int classNameLength = J9UTF8_LENGTH(classNameWrapper);
+            char *classNameChars = (char *)J9UTF8_DATA(classNameWrapper);
+            std::string className(classNameChars, classNameLength);
+
             int fieldNameLength = 0;
             const char *fieldNameChars = resolvedMethod->fieldNameChars(cpIndex, fieldNameLength);
-
             std::string fieldName(fieldNameChars, fieldNameLength);
-
-            int signatureLength = 0;
-            const char *signatureChars = resolvedMethod->fieldSignatureChars(cpIndex, signatureLength);
-
-            PAGNode *obj_ref = stack->popRef();
+            std::cout << "  -> fieldName= " << fieldName << std::endl;
 
             PAGNode *temp_node_ptr = new PAGNode(VARIABLE, globalIndex, nullptr, method_block, bci, methodIndex);
             pag->PAG_nodes.insert(temp_node_ptr);
             pag->methods_to_allMethodNodes[methodIndex].push_back(temp_node_ptr);
 
-            pag->addEdge(obj_ref, temp_node_ptr, GETFIELD, fieldName);
-            std::cout << "  -> fieldName= " << fieldName << std::endl;
+            if (bytecode == J9BCgetstatic)
+            {
+                if (class_to_staticPAGNode.find(className) == class_to_staticPAGNode.end())
+                {
+                    class_to_staticPAGNode[className] = new PAGNode(STATIC, className, methodIndex);
+                    pag->methods_to_allMethodNodes[methodIndex].push_back(class_to_staticPAGNode[className]);
+
+                    pag->PAG_nodes.insert(class_to_staticPAGNode[className]);
+                }
+
+                PAGNode *static_pag_ptr = class_to_staticPAGNode[className];
+                pag->addEdge(static_pag_ptr, temp_node_ptr, GETFIELD, fieldName);
+            }
+            else
+            {
+                PAGNode *obj_ref = stack->popRef();
+                pag->addEdge(obj_ref, temp_node_ptr, GETFIELD, fieldName);
+            }
 
             stack->pushRef(temp_node_ptr);
+            // update match edges
+            updateMatchEdges(pag);
+
+            // to get the dynamic type of field
+            for (auto *edge : pag->getMatchEdgesEndingAt(temp_node_ptr))
+            {
+                PAGNode *src = edge->src;
+                temp_node_ptr->pointee_class_names.insert(src->pointee_class_names.begin(), src->pointee_class_names.end());
+            }
             break;
         }
+        case J9BCputstatic:
         case J9BCputfield:
         {
+            J9ConstantPool *cp = J9_CP_FROM_METHOD(currentMethod);
+            J9ROMMethodRef *romMethodRef = (J9ROMMethodRef *)(cp->romConstantPool + cpIndex);
+            U_32 classRefIndex = romMethodRef->classRefCPIndex;
+            J9ROMStringRef *romStringRef = (J9ROMStringRef *)&cp->romConstantPool[classRefIndex];
+            J9UTF8 *classNameWrapper = J9ROMSTRINGREF_UTF8DATA(romStringRef);
+            int classNameLength = J9UTF8_LENGTH(classNameWrapper);
+            char *classNameChars = (char *)J9UTF8_DATA(classNameWrapper);
+            std::string className(classNameChars, classNameLength);
 
             int fieldNameLength = 0;
             const char *fieldNameChars = resolvedMethod->fieldNameChars(cpIndex, fieldNameLength);
 
             std::string fieldName(fieldNameChars, fieldNameLength);
 
-            int signatureLength = 0;
-            const char *signatureChars = resolvedMethod->fieldSignatureChars(cpIndex, signatureLength);
-
-            PAGNode *value = stack->popRef();
-            PAGNode *obj_ref = stack->popRef();
+            std::cout << "  ->className in putfield " << className << std::endl;
             std::cout << "  -> fieldName= " << fieldName << std::endl;
-            pag->addEdge(obj_ref, value, PUTFIELD, fieldName);
+            std::string fullName = className + "." + fieldName;
+            PAGNode *value = stack->popRef();
+
+            if (bytecode == J9BCputstatic)
+            {
+                if (class_to_staticPAGNode.find(className) == class_to_staticPAGNode.end())
+                {
+                    class_to_staticPAGNode[className] = new PAGNode(STATIC, className, methodIndex);
+                    pag->methods_to_allMethodNodes[methodIndex].push_back(class_to_staticPAGNode[className]);
+
+                    pag->PAG_nodes.insert(class_to_staticPAGNode[className]);
+                }
+
+                PAGNode *static_pag_ptr = class_to_staticPAGNode[className];
+                pag->addEdge(value, static_pag_ptr, PUTFIELD, fieldName);
+                pag->LeakyNodes.insert(value);
+            }
+            else
+            {
+                PAGNode *obj_ref = stack->popRef();
+                pag->addEdge(value, obj_ref, PUTFIELD, fieldName);
+
+                if (pag->threadAccessibleFields.find(fullName) != pag->threadAccessibleFields.end())
+                {
+                    pag->LeakyNodes.insert(value);
+                }
+            }
+
+            // update match edges
+            updateMatchEdges(pag);
+
             break;
         }
-        // case J9BCinvokevirtual:
-        // {
-        //     std::cout << "invokevirtual: cpIndex " << static_cast<int>((pc[2] << 8) | pc[1]) << std::endl;
-        //     // J9Method *j9method = jitResolveSpecialMethodRef(((TR_J9VMBase *)comp->fe())->getCurrentVMThread(),
-        //     //                                                 J9_CP_FROM_METHOD(reinterpret_cast<J9Method *>(resolvedMethod)), cpIndex, J9_RESOLVE_FLAG_JIT_COMPILE_TIME);
-        //     J9Method *j9method;
-        //     J9Method *j9Method_resolved = reinterpret_cast<J9Method *>(resolvedMethod);
-        //     J9ConstantPool *cp = J9_CP_FROM_METHOD(j9Method_resolved);
-        //     J9VMThread *j9vm = ((TR_J9VMBase *)comp->fe())->getCurrentVMThread();
-        //     J9RAMSpecialMethodRef *ramSpecialMethodRef = (J9RAMSpecialMethodRef *)&cp[cpIndex];
-        //     J9Method *ramMethod = ramSpecialMethodRef->method;
-        //     TR_ResolvedMethod* res = reinterpret_cast<TR_ResolvedMethod *>(ramMethod);
-        //     // std::cout << "The params slots are: " << res->numberOfParameterSlots() << std::endl;
+            // case J9BCinvokevirtual:
+            // {
+            //     std::cout << "invokevirtual: cpIndex " << static_cast<int>((pc[2] << 8) | pc[1]) << std::endl;
+            //     // J9Method *j9method = jitResolveSpecialMethodRef(((TR_J9VMBase *)comp->fe())->getCurrentVMThread(),
+            //     //                                                 J9_CP_FROM_METHOD(reinterpret_cast<J9Method *>(resolvedMethod)), cpIndex, J9_RESOLVE_FLAG_JIT_COMPILE_TIME);
+            //     J9Method *j9method;
+            //     J9Method *j9Method_resolved = reinterpret_cast<J9Method *>(resolvedMethod);
+            //     J9ConstantPool *cp = J9_CP_FROM_METHOD(j9Method_resolved);
+            //     J9VMThread *j9vm = ((TR_J9VMBase *)comp->fe())->getCurrentVMThread();
+            //     J9RAMSpecialMethodRef *ramSpecialMethodRef = (J9RAMSpecialMethodRef *)&cp[cpIndex];
+            //     J9Method *ramMethod = ramSpecialMethodRef->method;
+            //     TR_ResolvedMethod* res = reinterpret_cast<TR_ResolvedMethod *>(ramMethod);
+            //     // std::cout << "The params slots are: " << res->numberOfParameterSlots() << std::endl;
 
-        //     break;
-        // }
-        case J9BCinvokestatic: // TODO
+            //     break;
+            // }
+
+        case J9BCinvokedynamic:
+            break;
+        case J9BCinvokestatic:
         case J9BCinvokeinterface:
         case J9BCinvokevirtual:
         case J9BCinvokespecial:
@@ -1773,13 +1941,12 @@ public:
             J9Method *j9method;
 
             J9ConstantPool *cp = J9_CP_FROM_METHOD(currentMethod);
-
             J9VMThread *j9vm = ((TR_J9VMBase *)comp->fe())->getCurrentVMThread();
             J9RAMSpecialMethodRef *ramSpecialMethodRef = (J9RAMSpecialMethodRef *)&cp[cpIndex];
 
             J9ROMConstantPoolItem *romCPItem = &(J9_ROM_CP_FROM_CP(J9_CP_FROM_METHOD(currentMethod))[cpIndex]);
-
-            J9ROMNameAndSignature *nameAndSig = J9ROMMETHODREF_NAMEANDSIGNATURE((J9ROMMethodRef *)romCPItem);
+            J9ROMMethodRef *romMethodRef = (J9ROMMethodRef *)romCPItem;
+            J9ROMNameAndSignature *nameAndSig = J9ROMMETHODREF_NAMEANDSIGNATURE(romMethodRef);
             J9UTF8 *signature_utf8 = J9ROMNAMEANDSIGNATURE_SIGNATURE(nameAndSig);
             J9UTF8 *name_utf8 = J9ROMNAMEANDSIGNATURE_NAME(nameAndSig);
 
@@ -1791,10 +1958,10 @@ public:
             U_16 nameLength = J9UTF8_LENGTH(name_utf8);
             std::string name(nameChars, nameLength);
 
-            std::cout << "   -> " << name << "." << signature << " is the method!!!" << std::endl;
+            std::cout << "   -> " << name << signature << " is the method!!!" << std::endl;
             // methodName along with signature;
             string methodName = name + signature;
-            //
+
             vector<PAGNode *> actual_params;
             // get number of parameters
             int parameter_count = count_parameters(sigChars);
@@ -1806,45 +1973,103 @@ public:
                 }
             }
             std::reverse(actual_params.begin(), actual_params.end());
-            PAGNode *receiver_obj_ptr = stack->popRef();
-            std::unordered_set<std::string> methodsToPeek; // store in format of "className.methodName.signature"
+
             bool isStatic = (bytecode == J9BCinvokestatic);
             bool isInterfaceInvoke = (bytecode == J9BCinvokeinterface);
             int callsiteBCI = bci;
 
-            for (auto className : receiver_obj_ptr->pointee_class_names)
+            if (isStatic)
             {
-                std::string full_name = className+"."+name+signature;
-                if(full_name.rfind("java/lang/Object.<init>()")==0) 
-                    break;
+                J9ConstantPool *cp = J9_CP_FROM_METHOD(currentMethod);
+                J9ROMMethodRef *romMethodRef = (J9ROMMethodRef *)(cp->romConstantPool + cpIndex);
+                U_32 classRefIndex = romMethodRef->classRefCPIndex;
+                J9ROMStringRef *romStringRef = (J9ROMStringRef *)&cp->romConstantPool[classRefIndex];
+                J9UTF8 *classNameWrapper = J9ROMSTRINGREF_UTF8DATA(romStringRef);
+                int classNameLength = J9UTF8_LENGTH(classNameWrapper);
+                char *classNameChars = (char *)J9UTF8_DATA(classNameWrapper);
+                std::string className(classNameChars, classNameLength);
+
+                // U_32 classRefIndex = romMethodRef->classRefCPIndex;
+                // std::cout << "classRefIndex = " << classRefIndex << std::endl;
+                // // J9ROMClassRef *romClassRef = (J9ROMClassRef *)(cp + classRefIndex);
+                // J9ROMConstantPoolItem *romCPItem_class = &(J9_ROM_CP_FROM_CP(J9_CP_FROM_METHOD(currentMethod))[classRefIndex]);
+
+                // int32_t classNameLength;
+                // char *classNameChars = utf8Data(J9ROMCLASSREF_NAME((J9ROMClassRef *)&(((J9ROMConstantPoolItem *)cp->romConstantPool)[classRefIndex])));
+                // J9ROMConstantPoolItem *romClassCPItem = &(cp->romConstantPool[classRefIndex]);
+                // J9ROMClassRef *romClassRef = (J9ROMClassRef *)romClassCPItem;
+
+                // U_16 nameIndex = romClassRef->name;
+                // J9ROMConstantPoolItem *classNameUtf8CPItem = &(cp->romConstantPool[nameIndex]);
+                // J9UTF8 *classNameUtf8 = (J9UTF8 *)classNameUtf8CPItem;
+
+                // Now extract as before
+                // char *classNameChars = (char *)J9UTF8_DATA(classNameUtf8);
+                // U_16 classNameLength = J9UTF8_LENGTH(classNameUtf8);
+                // J9ROMStringRef *romStringRef = (J9ROMStringRef *)&cp->romConstantPool[classRefIndex];
+                // J9UTF8 * classNameWrapper = J9ROMSTRINGREF_UTF8DATA(romStringRef);
+                // int classNameLength = J9UTF8_LENGTH(classNameWrapper);
+                // char * classNameChars = (char*) J9UTF8_DATA(classNameWrapper);
+                // std::string className(classNameChars, classNameLength);
+                std::cout << "  ->invokestatic className  " << className << std::endl;
 
                 bool found = searchForOveridingMethodsInClass(className, name, signature, pag, ((TR_J9VMBase *)comp->fe()), resolvedMethod, actual_params, bci, comp);
-                if (!found)
+            }
+            else
+            {
+                PAGNode *receiver_obj_ptr = stack->popRef();
+
+                actual_params.insert(actual_params.begin(), receiver_obj_ptr); // (this,arg1,arg2,...)
+
+                J9ConstantPool *cp = J9_CP_FROM_METHOD(currentMethod);
+                J9ROMMethodRef *romMethodRef = (J9ROMMethodRef *)(cp->romConstantPool + cpIndex);
+                U_32 classRefIndex = romMethodRef->classRefCPIndex;
+                J9ROMStringRef *romStringRef = (J9ROMStringRef *)&cp->romConstantPool[classRefIndex];
+                J9UTF8 *classNameWrapper = J9ROMSTRINGREF_UTF8DATA(romStringRef);
+                int classNameLength = J9UTF8_LENGTH(classNameWrapper);
+                char *classNameChars = (char *)J9UTF8_DATA(classNameWrapper);
+                std::string staticClassName(classNameChars, classNameLength);
+                for (auto className : receiver_obj_ptr->pointee_class_names)
                 {
-                    bool found_in_superClass = false;
-
-                    TR_OpaqueClassBlock *type = comp->fe()->getClassFromSignature(className.c_str(), className.length(), comp->getCurrentMethod(), true);
-                    J9Class **superClasses = TR::Compiler->cls.superClassesOf(type);
-                    int classDepth = TR::Compiler->cls.classDepthOf(type);
-
-                    for (int i = classDepth - 1; i >= 0; i++)
+                    if (threadExtendingClasses.find(className) != threadExtendingClasses.end() && name == "start")
                     {
-                        J9UTF8 *superClassName_utf8 = J9ROMCLASS_CLASSNAME(superClasses[i]->romClass);
-                        char *name_chars = (char *)J9UTF8_DATA(superClassName_utf8);
-                        std::string superClassName(name_chars, superClassName_utf8->length);
-
-                        found = searchForOveridingMethodsInClass(superClassName, name, signature, pag, ((TR_J9VMBase *)comp->fe()), resolvedMethod, actual_params, bci, comp);
-                        if (found)
-                            break;
+                        name = "run";
                     }
-                }
 
-                if (!found)
-                {
-                    /*check if there is exactly one maximally-specific method
-                    (§5.4.3.3) in the superinterfaces of C that matches the resolved
-                    method's name and descriptor and is not abstract, then it is
-                    the method to be invoked.*/
+                    std::string full_name = className + "." + name + signature;
+                    std::string staticName = staticClassName + "." + name + signature;
+                    std::cout << "full_name = " << full_name << "Stt = " << staticName << std::endl;
+                    if (staticName.rfind("java/lang/Object.<init>()") == 0)
+                        break;
+
+                    bool found = searchForOveridingMethodsInClass(className, name, signature, pag, ((TR_J9VMBase *)comp->fe()), resolvedMethod, actual_params, bci, comp);
+                    if (!found)
+                    {
+                        bool found_in_superClass = false;
+
+                        TR_OpaqueClassBlock *type = comp->fe()->getClassFromSignature(className.c_str(), className.length(), comp->getCurrentMethod(), true);
+                        J9Class **superClasses = TR::Compiler->cls.superClassesOf(type);
+                        int classDepth = TR::Compiler->cls.classDepthOf(type);
+
+                        for (int i = classDepth - 1; i >= 0; i++)
+                        {
+                            J9UTF8 *superClassName_utf8 = J9ROMCLASS_CLASSNAME(superClasses[i]->romClass);
+                            char *name_chars = (char *)J9UTF8_DATA(superClassName_utf8);
+                            std::string superClassName(name_chars, superClassName_utf8->length);
+
+                            found = searchForOveridingMethodsInClass(superClassName, name, signature, pag, ((TR_J9VMBase *)comp->fe()), resolvedMethod, actual_params, bci, comp);
+                            if (found)
+                                break;
+                        }
+                    }
+
+                    if (!found)
+                    {
+                        /*check if there is exactly one maximally-specific method
+                        (§5.4.3.3) in the superinterfaces of C that matches the resolved
+                        method's name and descriptor and is not abstract, then it is
+                        the method to be invoked.*/
+                    }
                 }
             }
 
@@ -1865,6 +2090,7 @@ public:
             stack->pushRef(obj_ptr);
 
             obj_ptr->pointee_class_names.insert(className);
+            break;
         }
         case J9BCanewarray:
             break;
@@ -1883,9 +2109,6 @@ public:
         case J9BCmultianewarray:
             break;
 
-       
-        case J9BCinvokedynamic:
-            break;
         case J9BCgotow:
             break;
 
@@ -1907,7 +2130,7 @@ public:
 
     bool searchForOveridingMethodsInClass(std::string className, std::string method_name, std::string method_signature, PointerAssignmentGraph *pag, TR_J9VMBase *fej9, TR_ResolvedMethod *resolvedMethod, vector<PAGNode *> actual_params, int bci, TR::Compilation *comp)
     {
-        TR_OpaqueClassBlock *clazz = fej9->getClassFromSignature(className.c_str(), className.length(), resolvedMethod);
+        TR_OpaqueClassBlock *clazz = fej9->getClassFromSignature(className.c_str(), className.length(), resolvedMethod, true);
         J9Class *j9Class = (J9Class *)clazz;
         J9ROMClass *romClass = j9Class->romClass;
         J9ROMMethod *romMethod = J9ROMCLASS_ROMMETHODS(romClass);
@@ -1928,12 +2151,12 @@ public:
 
             std::string signature_name(signature, signatureLength);
             std::string target_method_name(methodName, methodNameLength);
-            std::string full_method_name = method_name + method_signature;
+            std::string full_method_name = className + "." + method_name + method_signature;
             if (method_signature == signature && method_name == target_method_name)
             {
                 if (analysedMethodNames.find(full_method_name) != analysedMethodNames.end() && changedMethodNames.find(full_method_name) == changedMethodNames.end())
                 {
-                    vector<PAGNode *> f_params = pag->getFormalParameterNodes(pag->_methodIndices[full_method_name]);
+                    vector<PAGNode *> f_params = pag->getFormalParameterNodes(getOrInsertMethodIndex(full_method_name, pag));
                     for (int i = 0; i < f_params.size(); i++)
                     {
                         pag->addEdge(actual_params[i], f_params[i], ASSIGN, bci);
@@ -1941,7 +2164,7 @@ public:
                 }
                 else // if (changedMethodNames.find(full_method_name) == changedMethodNames.end())
                 {
-                    traverse_bytecode(ramMethod, resolved_Method, pag, pag->_methodIndices[full_method_name], comp);
+                    traverse_bytecode(ramMethod, pag, getOrInsertMethodIndex(full_method_name, pag), comp);
                 }
                 return true;
             }
@@ -2041,5 +2264,107 @@ public:
             ++idx;
         }
         return false;
+    }
+
+    void updateMatchEdges(PointerAssignmentGraph *pag)
+    {
+        for (PAGEdge *e1 : pag->getStoreEdges())
+        {
+            for (PAGEdge *e2 : pag->getLoadEdges())
+            {
+                if (e1->field == e2->field)
+                {
+                    bool exists = false;
+                    for (PAGEdge *outEdge : e1->src->outgoing)
+                    {
+                        if (outEdge->dest == e2->dest && outEdge->type == MATCH)
+                        {
+                            exists = true;
+                            break;
+                        }
+                    }
+                    if (!exists)
+                    {
+                        pag->addEdge(e1->src, e2->dest, MATCH);
+                    }
+                }
+            }
+        }
+    }
+
+    void getall_loaded_classes(TR::Compilation *comp)
+    {
+        // std::cout << "All the loaded classes are: " << std::endl;
+        J9VMThread *vmThread = ((TR_J9VMBase *)comp->fe())->getCurrentVMThread();
+        J9JavaVM *javaVM = vmThread->javaVM;
+        TR::VMAccessCriticalSection criticalSection(comp);
+
+        J9ClassLoader *classLoader = NULL;
+        GC_PoolIterator classLoaderIterator(javaVM->classLoaderBlocks);
+        while (NULL != (classLoader = (J9ClassLoader *)classLoaderIterator.nextSlot()))
+        {
+            J9HashTableState walkState;
+            J9Class *clazz = javaVM->internalVMFunctions->hashClassTableStartDo(classLoader, &walkState, 0);
+            while (clazz)
+            {
+                if (!J9ROMCLASS_IS_ARRAY(clazz->romClass))
+                {
+                    // std::string className1 = TR::Compiler->cls.classSignature(comp, reinterpret_cast<TR_OpaqueClassBlock *>(clazz), comp->trMemory());
+                    // TR_ASSERT_FATAL(className.size() != 0, "unable to get class name for type");
+
+                    J9Class *j9clazz = (J9Class *)clazz;
+                    J9UTF8 *nameUTF8 = J9ROMCLASS_CLASSNAME(j9clazz->romClass);
+                    std::string className((char *)J9UTF8_DATA(nameUTF8), J9UTF8_LENGTH(nameUTF8));
+
+                    if (!(className.rfind("java/") == 0 || className.rfind("sun") == 0 || className.rfind("jdk") == 0 || className.rfind("openj9") == 0 || className.rfind("com") == 0))
+                    {
+                        //    std :: cout << className <<std::endl;
+                        all_loaded_classes.insert(className);
+                        className_to_fields[className] = getClassFields(clazz, comp->j9VMThread());
+                    }
+                }
+                clazz = javaVM->internalVMFunctions->hashClassTableNextDo(&walkState);
+            }
+        }
+        ////
+    }
+
+    void getThreadRelatedClasses(TR::Compilation *comp)
+    {
+        for (std::string class_name : all_loaded_classes)
+        {
+
+            TR_OpaqueClassBlock *type = comp->fe()->getClassFromSignature(class_name.c_str(), class_name.length(), comp->getCurrentMethod(), true);
+            J9Class **superClasses = TR::Compiler->cls.superClassesOf(type);
+
+            int classDepth = TR::Compiler->cls.classDepthOf(type);
+            // printf("Superclasses of %s:\n", TR::Compiler->cls.classSignature(comp, type, comp->trMemory()));
+
+            // ignore java/lang/Object (at index i=0)
+            for (int32_t i = 1; i < classDepth; ++i)
+            {
+                J9Class *superClass = superClasses[i];
+                // CHA[(TR_OpaqueClassBlock *)superClass].insert(type);
+
+                std::string superClassName = TR::Compiler->cls.classSignature(comp, (TR_OpaqueClassBlock *)superClass, comp->trMemory());
+                if (superClassName.rfind("Ljava/lang/Thread;") == 0)
+                {
+                    threadExtendingClasses.insert(class_name);
+                }
+            }
+
+            std::string tpName = TR::Compiler->cls.classSignature(comp, type, comp->trMemory());
+            // std::cout<< "tpName: "<<tpName<<std::endl;
+            for (J9ITable *iTableCur = TR::Compiler->cls.iTableOf(type); iTableCur; iTableCur = iTableCur->next)
+            {
+                // CHA[(TR_OpaqueClassBlock *)iTableCur->interfaceClass].insert(type);
+                // std::cout << TR::Compiler->cls.classSignature(comp, (TR_OpaqueClassBlock *)iTableCur->interfaceClass, comp->trMemory()) << "---->" << TR::Compiler->cls.classSignature(comp, type, comp->trMemory()) << std::endl;
+                std::string superClassName = TR::Compiler->cls.classSignature(comp, (TR_OpaqueClassBlock *)iTableCur->interfaceClass, comp->trMemory());
+                if (superClassName.rfind("Ljava/lang/Runnable") == 0)
+                {
+                    threadExtendingClasses.insert(class_name);
+                }
+            }
+        }
     }
 };
