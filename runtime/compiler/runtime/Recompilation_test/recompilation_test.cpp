@@ -1931,7 +1931,15 @@ public:
                 {
                     pag->LeakyNodes.insert(value);
                 }
+
+                for(std::string classN : obj_ref->pointee_class_names)
+                {   
+                    std::string full_name = classN+"."+fieldName;
+                    value->variableNames.insert(full_name);
+                }
             }
+
+            
 
             // update match edges
             updateMatchEdges(pag);
