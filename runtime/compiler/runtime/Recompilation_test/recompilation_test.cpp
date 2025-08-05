@@ -2086,7 +2086,7 @@ public:
                         J9Class **superClasses = TR::Compiler->cls.superClassesOf(type);
                         int classDepth = TR::Compiler->cls.classDepthOf(type);
 
-                        for (int i = classDepth - 1; i >= 0; i++)
+                        for (int i = classDepth - 1; i >= 0; i--)
                         {
                             J9UTF8 *superClassName_utf8 = J9ROMCLASS_CLASSNAME(superClasses[i]->romClass);
                             char *name_chars = (char *)J9UTF8_DATA(superClassName_utf8);
@@ -2186,7 +2186,7 @@ public:
             std::string signature_name(signature, signatureLength);
             std::string target_method_name(methodName, methodNameLength);
             std::string full_method_name = className + "." + method_name + method_signature;
-            if (method_signature == signature && method_name == target_method_name)
+            if (method_signature == signature_name && method_name == target_method_name)
             {
                 if (analysedMethodNames.find(full_method_name) != analysedMethodNames.end() && changedMethodNames.find(full_method_name) == changedMethodNames.end())
                 {
@@ -2250,9 +2250,10 @@ public:
         return count;
     }
 
-    bool is_reference_type(const char *signature, int argumentIndex) // 1-based Indexing, index 0 is the receiver object
+    bool is_reference_type(const char *signature, int argumentIndex) 
     {
-        int idx = 1;
+        int idx = 0;
+        // std::cout << "Argument index is : " << argumentIndex << std::endl;
         const char *p = strchr(signature, '(') + 1;
         while (*p && *p != ')')
         {
