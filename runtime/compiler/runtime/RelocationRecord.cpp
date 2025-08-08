@@ -79,6 +79,16 @@ extern void writeNodesToFile(TR::Compilation *comp, PointerAssignmentGraph *pag)
 static bool PAGupdated = false;
 static PointerAssignmentGraph *updated_pag;
 extern std::unordered_set<std::string> changedMethodNames;
+enum recompile_test_answers {   
+   NOT_TESTED,
+   RECOMPILE,
+   REUSE
+};  
+
+static  unordered_map<int,unordered_set<PAGEdge *>> methodIndex_to_old_allocs;
+static  unordered_map<int,unordered_set<PAGNode *>> methodIndex_to_old_escapes;
+static bool old_allocs_gathered = false;
+static std::unordered_map<int,recompile_test_answers> methodIndex_to_CanItBeResused;
 bool testIfCanBeReUsed(TR_RelocationRuntime *reloRuntime)
 {
    std::vector<J9Method *> modified_methods;
@@ -132,14 +142,30 @@ bool testIfCanBeReUsed(TR_RelocationRuntime *reloRuntime)
 
    std::string mx_methodSignature = classNameStr + "." + name + signature; // reloRuntime->currentResolvedMethod()->findOrCreateJittedMethodSymbol(comp)->signature(comp->trMemory());
    int mx = loaded_pag->_methodIndices[mx_methodSignature];
-   unordered_set<PAGEdge *> allocs = loaded_pag->getAllocEdges(mx);
-   unordered_set<PAGNode *> escapes = loaded_pag->getEscapingObjects(mx);
+   // if(methodIndex_to_CanItBeResused.find(mx) != methodIndex_to_CanItBeResused.end())
+   // {
+   //    if(methodIndex_to_CanItBeResused[mx] == REUSE) return CAN_BE_REUSED;
+   //    return NEED_TO_RECOMPILE;
+   // }
+   if(!old_allocs_gathered)
+   {
+      old_allocs_gathered = true;
+      for(int ind=1;ind<=(loaded_pag->_methodIndices.size());ind++)
+      {
+         methodIndex_to_old_allocs[ind] = loaded_pag->getAllocEdges(ind);
+         methodIndex_to_old_escapes[ind] = loaded_pag->getEscapingObjects(ind);
+      }
+      
+   }
+
+   unordered_set<PAGEdge *> allocs = methodIndex_to_old_allocs[mx];
+   unordered_set<PAGNode *> escapes = methodIndex_to_old_escapes[mx];
    // update the PAG
    if (!PAGupdated)
    {
 
       PAGupdated = true;
-      updated_pag = loaded_pag;
+      updated_pag = loaded_pag; // this is pointer no deep copy is made !!
       unordered_map<TR_OpaqueMethodBlock *, int> block_to_int;
       for (auto *modifed_method : modified_methods)
       {
@@ -168,24 +194,33 @@ bool testIfCanBeReUsed(TR_RelocationRuntime *reloRuntime)
          std::string my_methodSignature = cNameStr + "." + Mname + Msignature;
          std::cout << " my_methodSignature = " << my_methodSignature << std::endl;
          
+         int my;
          if (loaded_pag->_methodIndices.find(my_methodSignature) == loaded_pag->_methodIndices.end()) // This means that this method my was not analyzed before or called before.
-            continue;
+         {
+            my = loaded_pag->_methodIndices.size() + 1;
+            loaded_pag->_methodIndices[my_methodSignature] = my;
+         }
+         else 
+            my = loaded_pag->_methodIndices[my_methodSignature];
 
-         int my = loaded_pag->_methodIndices[my_methodSignature];
+         
          block_to_int[method_block] = my;
          updated_pag = rec_test.update_PAG(updated_pag, my, modifed_method, &(updated_pag->CG));
+         std::cout << "updated_pag size = " << updated_pag->PAG_nodes.size() << std::endl;
+         std::cout << "loaded_pag size = " << loaded_pag->PAG_nodes.size() << std::endl;
       }
    }
    // test for each of the modified method
-
+   std::cout << "Testing index = " << mx << std::endl;
    bool recompile = rec_test.should_recompile(mx, updated_pag, allocs, escapes);
 
    if (recompile)
    {
       std::cout << "Need to recompile: " << reloRuntime->comp()->signature() << std::endl;
+      methodIndex_to_CanItBeResused[mx] = RECOMPILE;
       return NEED_TO_RECOMPILE;
    }
-
+    methodIndex_to_CanItBeResused[mx] = REUSE;
    return CAN_BE_REUSED;
 }
 
@@ -706,6 +741,7 @@ TR_RelocationRecordGroup::applyRelocations(TR_RelocationRuntime *reloRuntime,
          if (reloRuntime->comp()->getOption(TR_RunMyAnalysis))
          {
             bool reuse = testIfCanBeReUsed(reloRuntime);
+            
 
             if (reuse == CAN_BE_REUSED)
             {

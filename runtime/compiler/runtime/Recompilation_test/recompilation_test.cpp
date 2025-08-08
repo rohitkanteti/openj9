@@ -78,7 +78,6 @@ public:
         for (PAGEdge *alloc_edge : old_allocated_edges)
         {
             PAGNode *o = alloc_edge->src;
-
             bool isEscaping = std::find(old_escaping_objects.begin(), old_escaping_objects.end(), o) != old_escaping_objects.end();
 
             if (isEscaping)
@@ -317,9 +316,19 @@ public:
     {
         // Case 1:
         std::unordered_set<PAGNode *> objs = p->points_to(start_node);
-        if (objs.find(target_obj) != objs.end())
-            return true;
+       
+        // if(objs.size() == 1)
+        // {
+        //     for(auto* ob : objs)
+        //     {
+        //         std::cout << "ob "<< ob << std::endl;
+        //     }
+        //     std::cout << "target ob " <<  target_obj << std::endl;
+        //     std::cout << "start node   " <<  start_node << std::endl;
 
+        // }
+         if (objs.find(target_obj) != objs.end())
+            return true;
         std::set<std::pair<PAGNode *, std::vector<std::string>>> visited;
 
         // Queue for BFS traversal (object, field_path)
