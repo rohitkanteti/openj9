@@ -30,12 +30,21 @@ extern TR_ResolvedMethod *getCachedResolvedMethodFromPtr(TR::Compilation *comp, 
 extern bool returnsObject(const std::string &methodSignature);
 extern bool isLibraryMethod(std::string methodName);
 extern std::unordered_set<std::string> getClassFields(J9Class *clazz, J9VMThread *vmThread);
+extern std::unordered_set<std::string> getReflectiveTargets(std::string &caller, int lineNumber);
 static std::unordered_set<std::string> analysedMethodNames;
 static unordered_set<std::string> threadExtendingClasses;
 static std::unordered_map<std::string, std::unordered_set<std::string>> className_to_fields;
-
+extern void getResolvedReflectiveCalls();
 static std::__1::unordered_map<std::string, PAGNode *> class_to_staticPAGNode;
+struct CallInfo
+{
+   std::string callee;
+   int lineNumber;
 
+   CallInfo(const std::string &callee, int line)
+       : callee(callee), lineNumber(line) {}
+};
+static std::unordered_map<std::string, std::vector<CallInfo>> reflectiveCallGraph;
 static unordered_set<std::string> all_loaded_classes;
 static bool threadClassesIdentified = false;
 std::unordered_set<std::string> changedMethodNames;
@@ -125,6 +134,7 @@ public:
         if (!threadClassesIdentified)
         {
             threadClassesIdentified = true;
+            getResolvedReflectiveCalls();
             getThreadRelatedClasses(reloRuntime->comp());
         }
         // remove intraprocedural edges [All the edges to formal params are `assign` edges]
@@ -316,7 +326,7 @@ public:
     {
         // Case 1:
         std::unordered_set<PAGNode *> objs = p->points_to(start_node);
-       
+
         // if(objs.size() == 1)
         // {
         //     for(auto* ob : objs)
@@ -327,7 +337,7 @@ public:
         //     std::cout << "start node   " <<  start_node << std::endl;
 
         // }
-         if (objs.find(target_obj) != objs.end())
+        if (objs.find(target_obj) != objs.end())
             return true;
         std::set<std::pair<PAGNode *, std::vector<std::string>>> visited;
 
@@ -1638,10 +1648,9 @@ public:
         // store a reference in an array
         case J9BCaastore:
         {
-            PAGNode* value = stack->popRef();
-            PAGNode* arrayRef = stack->popRef();
+            PAGNode *value = stack->popRef();
+            PAGNode *arrayRef = stack->popRef();
 
-            
             pag->addEdge(value, arrayRef, PUTFIELD, "$");
 
             // if (pag->threadAccessibleFields.find(fullName) != pag->threadAccessibleFields.end())
@@ -1941,14 +1950,12 @@ public:
                     pag->LeakyNodes.insert(value);
                 }
 
-                for(std::string classN : obj_ref->pointee_class_names)
-                {   
-                    std::string full_name = classN+"."+fieldName;
+                for (std::string classN : obj_ref->pointee_class_names)
+                {
+                    std::string full_name = classN + "." + fieldName;
                     value->variableNames.insert(full_name);
                 }
             }
-
-            
 
             // update match edges
             updateMatchEdges(pag);
@@ -2085,6 +2092,36 @@ public:
                     std::cout << "full_name = " << full_name << "Stt = " << staticName << std::endl;
                     if (staticName.rfind("java/lang/Object.<init>()") == 0)
                         break;
+
+                    if (name.find("java/lang/reflect/Constructor.newInstance([Ljava/lang/Object;)Ljava/lang/Object") != std::string::npos || name.find("java/lang/reflect/Method.invoke(Ljava/lang/Object;[Ljava/lang/Object;)Ljava/lang/Object;") != std::string::npos)
+                    {
+
+                        TR_OpaqueMethodBlock *method_block = reinterpret_cast<TR_OpaqueMethodBlock *>(currentMethod);
+                        TR_ResolvedMethod *resolved_Method = comp->fe()->createResolvedMethod(comp->trMemory(), method_block, 0);
+
+                        // int classNameLength = resolvedMethod->classNameLength();
+                        // const char* className = resolvedMethod->classNameChars();
+                        int methodNameLength = resolved_Method->nameLength();
+                        const char *methodName = resolved_Method->nameChars();
+                        int signatureLength = resolved_Method->signatureLength();
+                        const char *callerSignature = resolved_Method->signatureChars();
+
+                        std::string signature_name(callerSignature, signatureLength);
+                        std::string caller_method_name(methodName, methodNameLength);
+                        std::string full_caller_name = caller_method_name + "." + signature_name;
+
+                        int lineNumber = 0;
+                        
+                        std::unordered_set<std::string> targets = getReflectiveTargets(full_caller_name, lineNumber);
+                        for (std::string fullName : targets)
+                        {
+                            auto dotPos = fullName.find('.');
+                            auto parenPos = fullName.find('(');
+
+                            className = fullName.substr(0, dotPos);
+                            name = fullName.substr(dotPos + 1, parenPos - dotPos - 1) + "." + fullName.substr(parenPos);
+                        }
+                    }
 
                     bool found = searchForOveridingMethodsInClass(className, name, signature, pag, ((TR_J9VMBase *)comp->fe()), resolvedMethod, actual_params, bci, comp);
                     if (!found)
@@ -2259,7 +2296,7 @@ public:
         return count;
     }
 
-    bool is_reference_type(const char *signature, int argumentIndex) 
+    bool is_reference_type(const char *signature, int argumentIndex)
     {
         int idx = 0;
         // std::cout << "Argument index is : " << argumentIndex << std::endl;
