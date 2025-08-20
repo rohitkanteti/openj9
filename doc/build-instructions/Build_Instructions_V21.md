@@ -137,9 +137,9 @@ bash get_source.sh
 :penguin:
 When you have all the source files that you need, run the configure script, which detects how to build in the current build environment.
 ```
-bash configure --with-boot-jdk=/home/jenkins/bootjdks/jdk20
+bash configure --with-boot-jdk=/home/jenkins/bootjdks/jdk21
 ```
-:warning: The path in the example `--with-boot-jdk=` option is appropriate for the Docker installation. If you're not using the Docker environment, set the path that's appropriate for your setup, such as `<my_home_dir>/bootjdk20`.
+:warning: The path in the example `--with-boot-jdk=` option is appropriate for the Docker installation. If you're not using the Docker environment, set the path that's appropriate for your setup, such as `<my_home_dir>/bootjdk21`.
 
 :pencil: Configuring and building is not specific to OpenJ9 but uses the OpenJDK build infrastructure with OpenJ9 added.
 Many other configuration options are available, including options to increase the verbosity of the build output to include command lines (`LOG=cmdlines`), more info or debug information.
@@ -716,7 +716,7 @@ bash configure --openjdk-target=${OPENJ9_CC_PREFIX} \
                --with-x=${OPENJ9_CC_DIR}/${OPENJ9_CC_PREFIX}/ \
                --with-freetype-include=${OPENJ9_CC_DIR}/${OPENJ9_CC_PREFIX}/libc/usr/include/freetype2 \
                --with-freetype-lib=${OPENJ9_CC_DIR}/${OPENJ9_CC_PREFIX}/libc/usr/lib \
-               --with-boot-jdk=/root/bootjdk20 \
+               --with-boot-jdk=/root/bootjdk21 \
                --with-build-jdk=/root/bootjdk21 \
                --disable-warnings-as-errors \
                --disable-ddr
