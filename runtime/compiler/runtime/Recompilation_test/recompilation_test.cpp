@@ -2109,8 +2109,9 @@ public:
                         std::string signature_name(callerSignature, signatureLength);
                         std::string caller_method_name(methodName, methodNameLength);
                         std::string full_caller_name = caller_method_name + "." + signature_name;
-
-                        int lineNumber = 0;
+                        J9VMThread *vmThread = ((TR_J9VMBase *)comp->fe())->getCurrentVMThread();
+                        J9JavaVM *javaVM = vmThread->javaVM;
+                        int32_t lineNumber = (int32_t)getLineNumberForROMClass(javaVM, currentMethod, bci);;
                         
                         std::unordered_set<std::string> targets = getReflectiveTargets(full_caller_name, lineNumber);
                         for (std::string fullName : targets)
