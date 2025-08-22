@@ -35,7 +35,7 @@ static std::unordered_set<std::string> analysedMethodNames;
 static unordered_set<std::string> threadExtendingClasses;
 static std::unordered_map<std::string, std::unordered_set<std::string>> className_to_fields;
 extern void getResolvedReflectiveCalls();
-static std::__1::unordered_map<std::string, PAGNode *> class_to_staticPAGNode;
+static std::unordered_map<std::string, PAGNode *> class_to_staticPAGNode;
 struct CallInfo
 {
    std::string callee;
