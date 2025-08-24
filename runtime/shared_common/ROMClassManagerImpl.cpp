@@ -34,6 +34,7 @@
 #include "j9consts.h"
 #include <string.h>
 #include <unordered_set>
+#include <cstdio>
  
 std::unordered_set<J9ROMClass *> modified_ROMClass;
 void listROMClassMethods(J9ROMClass *romClass);
