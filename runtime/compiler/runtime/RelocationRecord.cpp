@@ -68,7 +68,7 @@
 #include "runtime/Recompilation_test/recompilation_test.cpp"
 #include "../../../../omr/compiler/optimizer/loadingPAG/LoadPAG.cpp"
  
-extern std::unordered_set<J9ROMClass *> modified_ROMClass;
+std::unordered_set<J9ROMClass *> modified_ROMClass;
 // extern std::unordered_set<J9ROMClass*>& getModifiedROMClassSet() ;
 extern std::string getMethodName(TR::ResolvedMethodSymbol *m);
 #define CAN_BE_REUSED true
