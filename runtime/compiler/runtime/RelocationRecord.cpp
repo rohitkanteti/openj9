@@ -67,8 +67,8 @@
 
 #include "runtime/Recompilation_test/recompilation_test.cpp"
 #include "../../../../omr/compiler/optimizer/loadingPAG/LoadPAG.cpp"
-
-std::unordered_set<J9ROMClass *> modified_ROMClass;
+#include "../../../../shared_header.hpp"
+extern std::unordered_set<J9ROMClass *> modified_ROMClass;
 // extern std::unordered_set<J9ROMClass*>& getModifiedROMClassSet() ;
 extern std::string getMethodName(TR::ResolvedMethodSymbol *m);
 #define CAN_BE_REUSED true
@@ -79,19 +79,35 @@ extern void writeNodesToFile(TR::Compilation *comp, PointerAssignmentGraph *pag)
 static bool PAGupdated = false;
 static PointerAssignmentGraph *updated_pag;
 extern std::unordered_set<std::string> changedMethodNames;
-enum recompile_test_answers {   
+enum recompile_test_answers
+{
    NOT_TESTED,
    RECOMPILE,
    REUSE
-};  
+};
 
-static  unordered_map<int,unordered_set<PAGEdge *>> methodIndex_to_old_allocs;
-static  unordered_map<int,unordered_set<PAGNode *>> methodIndex_to_old_escapes;
+static unordered_map<int, unordered_set<PAGEdge *>> methodIndex_to_old_allocs;
+static unordered_map<int, unordered_set<PAGNode *>> methodIndex_to_old_escapes;
 static bool old_allocs_gathered = false;
-static std::unordered_map<int,recompile_test_answers> methodIndex_to_CanItBeResused;
+static std::unordered_map<int, recompile_test_answers> methodIndex_to_CanItBeResused;
 bool testIfCanBeReUsed(TR_RelocationRuntime *reloRuntime)
 {
    std::vector<J9Method *> modified_methods;
+   FILE* f = std::fopen("modified_ROMClass.txt", "r");
+   TR_ASSERT_FATAL(f,"could not open modified_ROMClass.txt ");
+
+    char line[512];
+    while (std::fgets(line, sizeof(line), f)) {
+        // Parse pointer from hex string
+        void* addr = nullptr;
+        if (std::sscanf(line, "%p", &addr) == 1 && addr != nullptr) {
+            modified_ROMClass.insert(reinterpret_cast<J9ROMClass*>(addr));
+        }
+    }
+
+    std::fclose(f);
+  
+
    if (modified_ROMClass.size() <= 0)
       return CAN_BE_REUSED;
 
@@ -101,7 +117,6 @@ bool testIfCanBeReUsed(TR_RelocationRuntime *reloRuntime)
       const char *classNameData = (const char *)J9UTF8_DATA(className);
       uint16_t classNameLength = J9UTF8_LENGTH(className);
       std::string class_name(classNameData, classNameLength);
-
       modified_methods = getJ9MethodsOfClass(class_name, reloRuntime->comp());
    }
 
@@ -147,15 +162,14 @@ bool testIfCanBeReUsed(TR_RelocationRuntime *reloRuntime)
    //    if(methodIndex_to_CanItBeResused[mx] == REUSE) return CAN_BE_REUSED;
    //    return NEED_TO_RECOMPILE;
    // }
-   if(!old_allocs_gathered)
+   if (!old_allocs_gathered)
    {
       old_allocs_gathered = true;
-      for(int ind=1;ind<=(loaded_pag->_methodIndices.size());ind++)
+      for (int ind = 1; ind <= (loaded_pag->_methodIndices.size()); ind++)
       {
          methodIndex_to_old_allocs[ind] = loaded_pag->getAllocEdges(ind);
          methodIndex_to_old_escapes[ind] = loaded_pag->getEscapingObjects(ind);
       }
-      
    }
 
    unordered_set<PAGEdge *> allocs = methodIndex_to_old_allocs[mx];
@@ -193,17 +207,16 @@ bool testIfCanBeReUsed(TR_RelocationRuntime *reloRuntime)
 
          std::string my_methodSignature = cNameStr + "." + Mname + Msignature;
          std::cout << " my_methodSignature = " << my_methodSignature << std::endl;
-         
+
          int my;
          if (loaded_pag->_methodIndices.find(my_methodSignature) == loaded_pag->_methodIndices.end()) // This means that this method my was not analyzed before or called before.
          {
             my = loaded_pag->_methodIndices.size() + 1;
             loaded_pag->_methodIndices[my_methodSignature] = my;
          }
-         else 
+         else
             my = loaded_pag->_methodIndices[my_methodSignature];
 
-         
          block_to_int[method_block] = my;
          updated_pag = rec_test.update_PAG(updated_pag, my, modifed_method, &(updated_pag->CG));
          std::cout << "updated_pag size = " << updated_pag->PAG_nodes.size() << std::endl;
@@ -220,7 +233,7 @@ bool testIfCanBeReUsed(TR_RelocationRuntime *reloRuntime)
       methodIndex_to_CanItBeResused[mx] = RECOMPILE;
       return NEED_TO_RECOMPILE;
    }
-    methodIndex_to_CanItBeResused[mx] = REUSE;
+   methodIndex_to_CanItBeResused[mx] = REUSE;
    return CAN_BE_REUSED;
 }
 
@@ -741,7 +754,6 @@ TR_RelocationRecordGroup::applyRelocations(TR_RelocationRuntime *reloRuntime,
          if (reloRuntime->comp()->getOption(TR_RunMyAnalysis))
          {
             bool reuse = testIfCanBeReUsed(reloRuntime);
-            
 
             if (reuse == CAN_BE_REUSED)
             {
