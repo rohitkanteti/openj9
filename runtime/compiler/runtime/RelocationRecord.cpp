@@ -68,6 +68,7 @@
 #include "runtime/Recompilation_test/recompilation_test.cpp"
 #include "../../../../omr/compiler/optimizer/loadingPAG/LoadPAG.cpp"
 #include <cstdio>
+#include <fstream>
 std::unordered_set<J9ROMClass *> modified_ROMClass;
 // extern std::unordered_set<J9ROMClass*>& getModifiedROMClassSet() ;
 extern std::string getMethodName(TR::ResolvedMethodSymbol *m);
@@ -91,11 +92,16 @@ static unordered_map<int, unordered_set<PAGNode *>> methodIndex_to_old_escapes;
 static bool old_allocs_gathered = false;
 static std::unordered_map<int, recompile_test_answers> methodIndex_to_CanItBeResused;
 bool testIfCanBeReUsed(TR_RelocationRuntime *reloRuntime)
-{
+{  
+  
+    std::ifstream file("modified_ROMClass.txt");
+
+    if (!file.good()) 
+         return CAN_BE_REUSED; // no method was modified.
+
    std::vector<J9Method *> modified_methods;
    FILE* f = std::fopen("modified_ROMClass.txt", "r");
-   TR_ASSERT_FATAL(f,"could not open modified_ROMClass.txt ");
-
+   
     char line[512];
     while (std::fgets(line, sizeof(line), f)) {
         // Parse pointer from hex string
