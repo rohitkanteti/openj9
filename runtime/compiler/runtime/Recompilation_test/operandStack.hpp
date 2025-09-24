@@ -1,52 +1,73 @@
 #pragma once
-#include "../../../../../omr/compiler/optimizer/PAG/PointerAssignmentGraph.hpp"
 #include <vector>
-
+#include <set>
+#include "../../../../../omr/compiler/optimizer/PAG/PointerAssignmentGraph.hpp"
+#include <cstdint>
+#include <cassert>
+ 
 enum class OperandType {
-    EMPTY,     
     INT,
     LONG,
     FLOAT,
     DOUBLE,
     BOOLEAN_VALUE,
-    REFERENCE    
+    REFERENCE
 };
-   
+
+ 
 struct StackFrame {
     OperandType type;
     union {
-        int32_t  intValue;
-        int64_t  longValue;
-        float    floatValue;
-        double   doubleValue;
+        int32_t intValue;
+        int64_t longValue;
+        float floatValue;
+        double doubleValue;
         bool boolValue;
-        PAGNode*    refValue; // Represents an object reference
+        PAGNode* refValue;
     } value;
+
+    bool operator<(const StackFrame &other) const {
+        if (type != other.type) return type < other.type;
+        switch (type) {
+            case OperandType::INT: return value.intValue < other.value.intValue;
+            case OperandType::LONG: return value.longValue < other.value.longValue;
+            case OperandType::FLOAT: return value.floatValue < other.value.floatValue;
+            case OperandType::DOUBLE: return value.doubleValue < other.value.doubleValue;
+            case OperandType::BOOLEAN_VALUE: return value.boolValue < other.value.boolValue;
+            case OperandType::REFERENCE: return value.refValue < other.value.refValue;
+        }
+        return false;
+    }
 };
 
-#include "operandStack.hpp"
+class operandStack {
+public:
 
-class operandStack
-{
- public:
-    std::vector<StackFrame> stack;
+    operandStack() = default;
+ 
+    operandStack(const operandStack &other);
+    operandStack& operator=(const operandStack &other);
 
-    void push(StackFrame s);
+
     void pushInt(int32_t val);
-    void pushFloat(float val);
-    void pushBoolean(bool val);
-    void pushDouble(double val);
-    void pushRef(PAGNode* ref);
-
     void pushLong(int64_t val);
+    void pushFloat(float val);
+    void pushDouble(double val);
+    void pushBoolean(bool val);
+    void pushRef(PAGNode* ref);
+    void push(const std::set<StackFrame> &s);
+    void push(const std::set<PAGNode*> &s);
 
-    StackFrame pop() ;
 
-    int32_t popInt() ;
-    float popFloat();
-    double popDouble();
-    int64_t popLong() ;
-    bool popBoolean();
-    PAGNode* popRef() ;
+    std::set<StackFrame> pop();
 
+    std::set<int32_t>   popInt();
+    std::set<int64_t>   popLong();
+    std::set<float>     popFloat();
+    std::set<double>    popDouble();
+    std::set<bool>      popBoolean();
+    std::set<PAGNode*>  popRef();
+    bool merge(const operandStack &other);
+private:
+    std::vector<std::set<StackFrame>> stack;
 };
