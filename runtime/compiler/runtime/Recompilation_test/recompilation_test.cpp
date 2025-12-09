@@ -29,6 +29,7 @@ int globalIndex = 0;
 extern TR_ResolvedMethod *getCachedResolvedMethodFromPtr(TR::Compilation *comp, TR_OpaqueMethodBlock *methodPtr);
 extern bool returnsObject(const std::string &methodSignature);
 extern bool isLibraryMethod(std::string methodName);
+extern void traverse_cfg(J9Method *method, PointerAssignmentGraph *pag, int methodIndex, TR::Compilation *comp, PAGNode *primitive_node, PAGNode *comp_type2_primitiveNode);
 extern std::unordered_set<std::string> getClassFields(J9Class *clazz, J9VMThread *vmThread);
 extern std::unordered_set<std::string> getReflectiveTargets(std::string &caller, int lineNumber);
 static std::unordered_set<std::string> analysedMethodNames;
@@ -201,6 +202,10 @@ public:
         // the method index for my and my' must be the same.
 
         // traverse_bytecode(my_prime_J9Method, p, my, reloRuntime->comp());
+        PAGNode *comp_type_2 = new PAGNode();
+        comp_type_2->static_type = "COMP TYPE 2";
+        traverse_cfg(my_prime_J9Method, p, my, comp, new PAGNode(), comp_type_2);
+
 
         // J9JavaVM* vm = reloRuntime->javaVM();
         // if(vm)
