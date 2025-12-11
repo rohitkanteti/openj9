@@ -77,6 +77,7 @@ extern std::string getMethodName(TR::ResolvedMethodSymbol *m);
 
 std::vector<J9Method *> getJ9MethodsOfClass(const std::string &class_name, TR::Compilation *comp);
 extern void writeNodesToFile(TR::Compilation *comp, PointerAssignmentGraph *pag);
+extern J9Class *findClassAcrossAllLoaders(TR::Compilation *comp, const std::string &className, TR_J9VMBase *fej9, TR_ResolvedMethod *resolvedMethod);
 static bool PAGupdated = false;
 static PointerAssignmentGraph *updated_pag;
 extern std::unordered_set<std::string> changedMethodNames;
@@ -91,40 +92,107 @@ static unordered_map<int, unordered_set<PAGEdge *>> methodIndex_to_old_allocs;
 static unordered_map<int, unordered_set<PAGNode *>> methodIndex_to_old_escapes;
 static bool old_allocs_gathered = false;
 static std::unordered_map<int, recompile_test_answers> methodIndex_to_CanItBeResused;
-bool testIfCanBeReUsed(TR_RelocationRuntime *reloRuntime)
-{  
-  
-    std::ifstream file("modified_ROMClass.txt");
+#include <string>
+#include <algorithm> // For std::replace
+#include "j9.h"
+#include "rommeth.h"
 
-    if (!file.good()) 
-         return CAN_BE_REUSED; // no method was modified.
+J9Method *findMethodByString(TR_RelocationRuntime *reloRuntime, TR::Compilation *comp, const char *rawString)
+{
+   if (!rawString)
+      return NULL;
+
+   std::string fullString(rawString);
+   size_t openParen = fullString.find('(');
+    if (openParen == std::string::npos) return NULL;
+
+   std::string signature = fullString.substr(openParen); // "(Ljava/lang/Object;)Z"
+    std::string classAndMethod = fullString.substr(0, openParen); // "java.util.ArrayList.add"
+
+    // Find the last dot in the classAndMethod part
+    size_t lastDot = classAndMethod.find_last_of('.');
+    if (lastDot == std::string::npos) return NULL; 
+
+    std::string className = classAndMethod.substr(0, lastDot); // "java.util.ArrayList"
+    std::string methodName = classAndMethod.substr(lastDot + 1); // "add"
+
+    // J9 VM expects "com/foo/Bar", not "com.foo.Bar"
+   std::replace(className.begin(), className.end(), '.', '/');
+
+   auto fe = comp->fej9();
+   TR::VMAccessCriticalSection getClassFromCP(reloRuntime->fej9());
+   J9JavaVM *vm = reloRuntime->javaVM();
+   J9Class *targetClass = findClassAcrossAllLoaders(comp, className, (TR_J9VMBase *)fe, NULL);
+
+   if (!targetClass)
+      return NULL;
+
+   // 7. Iterate ROM Methods to find the match
+   J9ROMClass *romClass = targetClass->romClass;
+   J9ROMMethod *romMethod = J9ROMCLASS_ROMMETHODS(romClass);
+
+   for (U_32 i = 0; i < romClass->romMethodCount; i++)
+   {
+      J9Method *ramMethod = &targetClass->ramMethods[i];
+      // std::cout << "Method added is: " ;
+      TR_OpaqueMethodBlock *method_block = reinterpret_cast<TR_OpaqueMethodBlock *>(ramMethod);
+      TR_ResolvedMethod *resolved_Method = comp->fe()->createResolvedMethod(comp->trMemory(), method_block, 0);
+
+      // int classNameLength = resolvedMethod->classNameLength();
+      // const char* className = resolvedMethod->classNameChars();
+      int methodNameLength = resolved_Method->nameLength();
+      const char *methodName = resolved_Method->nameChars();
+      int signatureLength = resolved_Method->signatureLength();
+      const char *signature = resolved_Method->signatureChars();
+
+      std::string signature_name(signature, signatureLength);
+      std::string target_method_name(methodName, methodNameLength);
+      if (signature == signature_name && methodName == target_method_name)
+      {
+        return ramMethod;
+      }
+   }
+
+   return NULL;
+}
+bool testIfCanBeReUsed(TR_RelocationRuntime *reloRuntime, char *changedMethodName)
+{
+
+   //  std::ifstream file("modified_ROMClass.txt");
+
+   //  if (!file.good())
+   //       return CAN_BE_REUSED; // no method was modified.
 
    std::vector<J9Method *> modified_methods;
-   FILE* f = std::fopen("modified_ROMClass.txt", "r");
-   
-    char line[512];
-    while (std::fgets(line, sizeof(line), f)) {
-        // Parse pointer from hex string
-        void* addr = nullptr;
-        if (std::sscanf(line, "%p", &addr) == 1 && addr != nullptr) {
-            modified_ROMClass.insert(reinterpret_cast<J9ROMClass*>(addr));
-        }
-    }
+   // FILE* f = std::fopen("modified_ROMClass.txt", "r");
 
-    std::fclose(f);
-  
+   //  char line[512];
+   //  while (std::fgets(line, sizeof(line), f)) {
+   //      // Parse pointer from hex string
+   //      void* addr = nullptr;
+   //      if (std::sscanf(line, "%p", &addr) == 1 && addr != nullptr) {
+   //          modified_ROMClass.insert(reinterpret_cast<J9ROMClass*>(addr));
+   //      }
+   //  }
 
-   if (modified_ROMClass.size() <= 0)
+   //  std::fclose(f);
+
+   J9Method* modifiedJ9Method = findMethodByString(reloRuntime,reloRuntime->comp(),changedMethodName);
+   TR_ASSERT_FATAL(modifiedJ9Method,"Could not get the J9Method for the specified method");
+
+   modified_methods.push_back(modifiedJ9Method);
+
+   if (modified_methods.size() <= 0)
       return CAN_BE_REUSED;
 
-   for (auto *modifiedClass : modified_ROMClass)
-   {
-      J9UTF8 *className = J9ROMCLASS_CLASSNAME(modifiedClass);
-      const char *classNameData = (const char *)J9UTF8_DATA(className);
-      uint16_t classNameLength = J9UTF8_LENGTH(className);
-      std::string class_name(classNameData, classNameLength);
-      modified_methods = getJ9MethodsOfClass(class_name, reloRuntime->comp());
-   }
+   // for (auto *modifiedClass : modified_ROMClass)
+   // {
+   //    J9UTF8 *className = J9ROMCLASS_CLASSNAME(modifiedClass);
+   //    const char *classNameData = (const char *)J9UTF8_DATA(className);
+   //    uint16_t classNameLength = J9UTF8_LENGTH(className);
+   //    std::string class_name(classNameData, classNameLength);
+   //    modified_methods = getJ9MethodsOfClass(class_name, reloRuntime->comp());
+   // }
 
    // Load the PAG
    std::string nodes = "nodes.txt";
@@ -753,13 +821,15 @@ TR_RelocationRecordGroup::applyRelocations(TR_RelocationRuntime *reloRuntime,
       TR_RelocationRecord *reloRecord = TR_RelocationRecord::create(&storage, reloRuntime, reloTarget, recordPointer);
       TR_RelocationErrorCode rc = handleRelocation(reloRuntime, reloTarget, reloRecord, reloOrigin);
       TR::Compilation *comp = reloRuntime->comp();
-      if (rc != TR_RelocationErrorCode::relocationOK)
+      char *changedMethodName = comp->getOptions()->getChangedMethodName();
+
+      if (changedMethodName != NULL || rc != TR_RelocationErrorCode::relocationOK)
       {
          uint8_t reloType = recordPointer->type(reloTarget);
          aotStats->numRelocationsFailedByType[reloType]++;
          if (reloRuntime->comp()->getOption(TR_RunMyAnalysis))
          {
-            bool reuse = testIfCanBeReUsed(reloRuntime);
+            bool reuse = testIfCanBeReUsed(reloRuntime, changedMethodName);
 
             if (reuse == CAN_BE_REUSED)
             {
