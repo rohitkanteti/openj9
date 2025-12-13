@@ -40,7 +40,7 @@ extern bool isReturnOrThrow(TR_J9ByteCode bc);
 extern bool isBranch(TR_J9ByteCode bc);
 extern bool isSwitch(TR_J9ByteCode bc);
 extern void executeBytecode(TR_J9ByteCode bytecode, uint8_t *pc, PointerAssignmentGraph *pag, operandStack *stack, TR_ResolvedMethod *resolvedMethod,
-                     J9Method *currentMethod, int methodIndex, int bci, std::unordered_map<int, PAGNode *> &variableMap, bool hasReturnType, TR::Compilation *comp, J9Class *J9currentClass, PAGNode *primitive_node, PAGNode *comp_type_2);
+                            J9Method *currentMethod, int methodIndex, int bci, std::unordered_map<int, PAGNode *> &variableMap, bool hasReturnType, TR::Compilation *comp, J9Class *J9currentClass, PAGNode *primitive_node, PAGNode *comp_type_2);
 
 void traverse_cfg(J9Method *method, PointerAssignmentGraph *pag, int methodIndex, TR::Compilation *comp, PAGNode *primitive_node, PAGNode *comp_type2_primitiveNode);
 extern std::unordered_set<std::string> getClassFields(J9Class *clazz, J9VMThread *vmThread);
@@ -94,7 +94,7 @@ std::unordered_set<std::string> changedMethodNames;
 
 PointerAssignmentGraph *pag_to_use = nullptr;
 
-CFG *buildCFG(TR_OpaqueMethodBlock *method_block, TR::Compilation *comp, std::map<int32_t,Block *> &blocks,Block *&entryBlock)
+CFG *buildCFG(TR_OpaqueMethodBlock *method_block, TR::Compilation *comp, std::map<int32_t, Block *> &blocks, Block *&entryBlock)
 {
     int32_t methodSize = TR::Compiler->mtd.bytecodeSize(method_block);
     uintptr_t methodStart = TR::Compiler->mtd.bytecodeStart(method_block);
@@ -142,20 +142,20 @@ CFG *buildCFG(TR_OpaqueMethodBlock *method_block, TR::Compilation *comp, std::ma
     // }
 
     // Create TR::Block nodes
-    
+
     int blockID = 0;
     for (int32_t leader : leaders)
-   {
-      
-      // TR::Block *b = new (comp->trHeapMemory()) TR::Block(...);
-      Block *b = new Block(blockID++, leader);
-      
-      // b->getEntry()->join(b->getExit()); -- Not needed for simple CFG
-      // b->setByteCodeIndex(leader, comp); -- Handled in constructor
-      
-      blocks[leader] = b;
-      cfg->addNode(b);
-   }
+    {
+
+        // TR::Block *b = new (comp->trHeapMemory()) TR::Block(...);
+        Block *b = new Block(blockID++, leader);
+
+        // b->getEntry()->join(b->getExit()); -- Not needed for simple CFG
+        // b->setByteCodeIndex(leader, comp); -- Handled in constructor
+
+        blocks[leader] = b;
+        cfg->addNode(b);
+    }
 
     std::vector<int32_t> leaderVec(leaders.begin(), leaders.end());
     sort(leaderVec.begin(), leaderVec.end());
@@ -297,14 +297,11 @@ public:
         return false; // No recompilation needed
     }
 
-    PointerAssignmentGraph *update_PAG(PointerAssignmentGraph *p, int my, J9Method *my_prime_J9Method, CallGraph *CG)
+    PointerAssignmentGraph *update_PAG(PointerAssignmentGraph *p, int my, J9Method *my_prime_J9Method, CallGraph *CG,string my_full_name)
     {
 
         std::cout << "The index my is = " << my << std::endl;
-        if (analysedMethodNames.empty())
-        {
-            // getAnalyzedMethods();
-        }
+        
         if (all_loaded_classes.empty())
         {
             getall_loaded_classes(reloRuntime->comp());
@@ -2705,9 +2702,12 @@ public:
             {
                 PAGNode *param_node_ptr = new PAGNode(VARIABLE, 0, nullptr, method_block, -1, methodIndex, className);
                 // std::cout << "FOR recvr Method index = " << methodIndex << std::endl;
-                pag->methodIndex_to_allMethodNodes[methodIndex].push_back(param_node_ptr);
-                pag->PAG_nodes.insert(param_node_ptr);
-                pag->methodIndex_to_formalNodes[methodIndex].push_back(param_node_ptr);
+                if(pag->methodIndex_to_formalNodes.find(methodIndex) == pag->methodIndex_to_formalNodes.end())
+                {
+                    pag->methodIndex_to_allMethodNodes[methodIndex].push_back(param_node_ptr);
+                    pag->PAG_nodes.insert(param_node_ptr);
+                    pag->methodIndex_to_formalNodes[methodIndex].push_back(param_node_ptr);
+                }
                 reference_params++;
             }
 
@@ -2720,15 +2720,18 @@ public:
                     int slot_num = getSlotForArgument(methodSignature, i);
 
                     std::string static_type = getParameterReferenceType(methodSignature, i);
-                    PAGNode *param_node_ptr = new PAGNode(VARIABLE, slot_num, nullptr, method_block, -1, methodIndex, static_type);
-                    // std::cout << "for is_reference_type Method index = " << methodIndex << std::endl;
-                    pag->methodIndex_to_allMethodNodes[methodIndex].push_back(param_node_ptr);
-                    pag->PAG_nodes.insert(param_node_ptr);
-                    pag->methodIndex_to_formalNodes[methodIndex].push_back(param_node_ptr);
+                    if(pag->methodIndex_to_formalNodes.find(methodIndex) == pag->methodIndex_to_formalNodes.end())
+                    {
+                        PAGNode *param_node_ptr = new PAGNode(VARIABLE, slot_num, nullptr, method_block, -1, methodIndex, static_type);
+                        // std::cout << "for is_reference_type Method index = " << methodIndex << std::endl;
+                        pag->methodIndex_to_allMethodNodes[methodIndex].push_back(param_node_ptr);
+                        pag->PAG_nodes.insert(param_node_ptr);
+                        pag->methodIndex_to_formalNodes[methodIndex].push_back(param_node_ptr);
+                    }
                 }
             }
 
-            if (hasReturnType)
+            if (hasReturnType && (pag->methodIndex_to_returnNode.find(methodIndex) == pag->methodIndex_to_returnNode.end()))
             {
                 pag->methodIndex_to_returnNode[methodIndex] = new PAGNode(RETURN, RETURN_NODE_NAME, NULL, method_block, -1, methodIndex);
                 pag->methodIndex_to_returnNode[methodIndex]->static_type = returnStaticType;
@@ -2818,9 +2821,9 @@ public:
             }
 
             // propagate to successors
-            for (Block* succ : bb->succs)
+            for (Block *succ : bb->succs)
             {
-                
+
                 int succBci = succ->startBCI;
                 if (inStacks.find(succ) == inStacks.end())
                 {

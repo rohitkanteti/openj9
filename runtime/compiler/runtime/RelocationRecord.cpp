@@ -106,23 +106,23 @@ J9Method *findMethodByString(TR_RelocationRuntime *reloRuntime, TR::Compilation 
    size_t openParen = fullString.find('(');
     if (openParen == std::string::npos) return NULL;
 
-   std::string signature = fullString.substr(openParen); // "(Ljava/lang/Object;)Z"
+   std::string signatureOfChangedMethod = fullString.substr(openParen); // "(Ljava/lang/Object;)Z"
     std::string classAndMethod = fullString.substr(0, openParen); // "java.util.ArrayList.add"
 
     // Find the last dot in the classAndMethod part
     size_t lastDot = classAndMethod.find_last_of('.');
     if (lastDot == std::string::npos) return NULL; 
 
-    std::string className = classAndMethod.substr(0, lastDot); // "java.util.ArrayList"
-    std::string methodName = classAndMethod.substr(lastDot + 1); // "add"
+    std::string classNameOfChangedMethod = classAndMethod.substr(0, lastDot); // "java.util.ArrayList"
+    std::string methodNameOfChangedMethod = classAndMethod.substr(lastDot + 1); // "add"
 
     // J9 VM expects "com/foo/Bar", not "com.foo.Bar"
-   std::replace(className.begin(), className.end(), '.', '/');
+   std::replace(classNameOfChangedMethod.begin(), classNameOfChangedMethod.end(), '.', '/');
 
    auto fe = comp->fej9();
    TR::VMAccessCriticalSection getClassFromCP(reloRuntime->fej9());
    J9JavaVM *vm = reloRuntime->javaVM();
-   J9Class *targetClass = findClassAcrossAllLoaders(comp, className, (TR_J9VMBase *)fe, NULL);
+   J9Class *targetClass = findClassAcrossAllLoaders(comp, classNameOfChangedMethod, (TR_J9VMBase *)fe, NULL);
 
    if (!targetClass)
       return NULL;
@@ -141,13 +141,13 @@ J9Method *findMethodByString(TR_RelocationRuntime *reloRuntime, TR::Compilation 
       // int classNameLength = resolvedMethod->classNameLength();
       // const char* className = resolvedMethod->classNameChars();
       int methodNameLength = resolved_Method->nameLength();
-      const char *methodName = resolved_Method->nameChars();
+      const char *method_Name = resolved_Method->nameChars();
       int signatureLength = resolved_Method->signatureLength();
       const char *signature = resolved_Method->signatureChars();
 
       std::string signature_name(signature, signatureLength);
-      std::string target_method_name(methodName, methodNameLength);
-      if (signature == signature_name && methodName == target_method_name)
+      std::string target_method_name(method_Name, methodNameLength);
+      if (methodNameOfChangedMethod == target_method_name && signatureOfChangedMethod == signature_name)
       {
         return ramMethod;
       }
@@ -197,7 +197,7 @@ bool testIfCanBeReUsed(TR_RelocationRuntime *reloRuntime, char *changedMethodNam
    // Load the PAG
    std::string nodes = "nodes.txt";
    std::string edges = "PAGEdges.txt";
-   std::string methods = "methods_to_PAGNodes.txt";
+   std::string methods = "methodIndex_to_PAGNodes.txt";
    std::string callgraph = "callgraph.txt";
    std::string threadAccess = "threadAccesible.txt";
    std::string staticFields = "staticFields.txt";
@@ -282,6 +282,21 @@ bool testIfCanBeReUsed(TR_RelocationRuntime *reloRuntime, char *changedMethodNam
          std::string my_methodSignature = cNameStr + "." + Mname + Msignature;
          std::cout << " my_methodSignature = " << my_methodSignature << std::endl;
 
+         if (analysedMethodNames.empty())
+         {
+               std::ifstream file("analyzedMethods.txt");
+               std::string line;
+               int index = 1;
+
+               while (std::getline(file, line))
+               {
+                  analysedMethodNames.insert(line);
+               }
+               file.close();
+         }
+
+         analysedMethodNames.erase(my_methodSignature);
+
          int my;
          if (loaded_pag->_methodIndices.find(my_methodSignature) == loaded_pag->_methodIndices.end()) // This means that this method my was not analyzed before or called before.
          {
@@ -292,7 +307,7 @@ bool testIfCanBeReUsed(TR_RelocationRuntime *reloRuntime, char *changedMethodNam
             my = loaded_pag->_methodIndices[my_methodSignature];
 
          block_to_int[method_block] = my;
-         updated_pag = rec_test.update_PAG(updated_pag, my, modifed_method, &(updated_pag->CG));
+         updated_pag = rec_test.update_PAG(updated_pag, my, modifed_method, &(updated_pag->CG),my_methodSignature);
          std::cout << "updated_pag size = " << updated_pag->PAG_nodes.size() << std::endl;
          std::cout << "loaded_pag size = " << loaded_pag->PAG_nodes.size() << std::endl;
       }
@@ -823,7 +838,7 @@ TR_RelocationRecordGroup::applyRelocations(TR_RelocationRuntime *reloRuntime,
       TR::Compilation *comp = reloRuntime->comp();
       char *changedMethodName = comp->getOptions()->getChangedMethodName();
 
-      if (changedMethodName != NULL || rc != TR_RelocationErrorCode::relocationOK)
+      if (/*changedMethodName != NULL || */ rc != TR_RelocationErrorCode::relocationOK)
       {
          uint8_t reloType = recordPointer->type(reloTarget);
          aotStats->numRelocationsFailedByType[reloType]++;
