@@ -473,7 +473,7 @@ public:
         return fields;
     }
 
-    // set<AbstractNodes> get_field_target(AbstractNode current_obj, string field)
+    // set<AbstractNodes> get_field_target(AbstractNode current_node, string field)
     std::unordered_set<PAGNode *> get_field_target(PointerAssignmentGraph *p, PAGNode *obj, std::string field)
     {
         std::unordered_set<PAGNode *> targets;
@@ -523,43 +523,48 @@ public:
         std::queue<std::pair<PAGNode *, std::vector<std::string>>> queue;
 
         // Enqueue all objects directly pointed to by start_node
-        for (PAGNode *obj : objs)
-        {
-            queue.push({obj, {}});
-            visited.insert({obj, {}});
-        }
+        // for (PAGNode *obj : objs)
+        // {
+        //     queue.push({obj, {}});
+        //     visited.insert({obj, {}});
+        // }
 
+        queue.push({start_node, {}});
+        visited.insert({start_node, {}});
+        
         while (!queue.empty())
         {
             auto front = queue.front();
-            auto current_obj = front.first;
+            auto current_node = front.first;
             auto field_path = front.second;
             queue.pop();
 
             // Check if current object matches target_obj
-            if (current_obj == target_obj)
+            std::unordered_set<PAGNode *> pts_set = p->points_to(current_node);
+            if(pts_set.find(target_obj) != pts_set.end())
                 return true;
 
             // Explore fields of the current object
-            for (std::string field : p->get_fields(current_obj))
+            for (std::string field : p->get_fields(current_node))
             {
 
-                auto next_objs = p->get_field_target(current_obj, field);
+                auto next_nodes = p->get_field_target(current_node, field);
                 auto new_field_path = field_path;
                 new_field_path.push_back(field);
 
-                for (PAGNode *next_obj : next_objs)
+                for (PAGNode *next_node : next_nodes)
                 {
-                    auto path_key = std::make_pair(next_obj, new_field_path);
+                    auto path_key = std::make_pair(next_node, new_field_path);
 
                     if (visited.find(path_key) == visited.end())
                     {
                         visited.insert(path_key);
-                        queue.push({next_obj, new_field_path});
+                        queue.push({next_node, new_field_path});
                     }
 
                     // Check if this path reaches target_obj
-                    if (next_obj == target_obj)
+                    std::unordered_set<PAGNode *> pts_set = p->points_to(next_node);
+                    if(pts_set.find(target_obj) != pts_set.end())
                         return true;
                 }
             }
