@@ -842,7 +842,7 @@ TR_RelocationRecordGroup::applyRelocations(TR_RelocationRuntime *reloRuntime,
       {
          uint8_t reloType = recordPointer->type(reloTarget);
          aotStats->numRelocationsFailedByType[reloType]++;
-         if (reloRuntime->comp()->getOption(TR_RunMyAnalysis))
+         if (reloRuntime->comp()->getOption(TR_RunMyAnalysis) && rc != TR_RelocationErrorCode::inlinedMethodRelocationFailure)
          {
             bool reuse = testIfCanBeReUsed(reloRuntime, changedMethodName);
 
