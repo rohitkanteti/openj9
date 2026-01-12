@@ -180,10 +180,7 @@ bool testIfCanBeReUsed(TR_RelocationRuntime *reloRuntime, char *changedMethodNam
    //  std::fclose(f);
 
    FILE* f = std::fopen(changedMethodNamesFile, "r");
-   if (f == nullptr) {
-      perror("Error opening file");
-      return; 
-   }
+   TR_ASSERT_FATAL(f,"Could not open the changed method names file");
 
    char line[512];
    while (std::fgets(line, sizeof(line), f)) {
