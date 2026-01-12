@@ -155,13 +155,15 @@ J9Method *findMethodByString(TR_RelocationRuntime *reloRuntime, TR::Compilation 
 
    return NULL;
 }
-bool testIfCanBeReUsed(TR_RelocationRuntime *reloRuntime, char *changedMethodName)
-{
+static std::unordered_set<std::string> modified_method_names;
+bool testIfCanBeReUsed(TR_RelocationRuntime *reloRuntime, char *changedMethodNamesFile)
+{  
+   std::string filename_str(changedMethodNamesFile);
 
-   //  std::ifstream file("modified_ROMClass.txt");
+    std::ifstream file(filename_str);
 
-   //  if (!file.good())
-   //       return CAN_BE_REUSED; // no method was modified.
+    if (!file.good())
+         return CAN_BE_REUSED; // no method was modified.
 
    std::vector<J9Method *> modified_methods;
    // FILE* f = std::fopen("modified_ROMClass.txt", "r");
@@ -177,10 +179,38 @@ bool testIfCanBeReUsed(TR_RelocationRuntime *reloRuntime, char *changedMethodNam
 
    //  std::fclose(f);
 
-   J9Method* modifiedJ9Method = findMethodByString(reloRuntime,reloRuntime->comp(),changedMethodName);
-   TR_ASSERT_FATAL(modifiedJ9Method,"Could not get the J9Method for the specified method");
+   FILE* f = std::fopen(changedMethodNamesFile, "r");
+   if (f == nullptr) {
+      perror("Error opening file");
+      return; 
+   }
 
-   modified_methods.push_back(modifiedJ9Method);
+   char line[512];
+   while (std::fgets(line, sizeof(line), f)) {
+      std::string line_str(line);
+
+     
+      line_str.erase(std::remove(line_str.begin(), line_str.end(), '\n'), line_str.end());
+      line_str.erase(std::remove(line_str.begin(), line_str.end(), '\r'), line_str.end());
+
+      if (!line_str.empty()) {
+         modified_method_names.insert(line_str);
+      }
+   }
+
+   std::fclose(f);
+
+   // J9Method* modifiedJ9Method = findMethodByString(reloRuntime,reloRuntime->comp(),changedMethodName);
+   // TR_ASSERT_FATAL(modifiedJ9Method,"Could not get the J9Method for the specified method");
+
+   // modified_methods.push_back(modifiedJ9Method);
+
+   for(std::string changedMethodName : modified_method_names)
+   {
+      J9Method* modifiedJ9Method = findMethodByString(reloRuntime,reloRuntime->comp(),changedMethodName.c_str());
+      TR_ASSERT_FATAL(modifiedJ9Method,"Could not get the J9Method for the specified method");
+      modified_methods.push_back(modifiedJ9Method);
+   }
 
    if (modified_methods.size() <= 0)
       return CAN_BE_REUSED;
@@ -836,7 +866,7 @@ TR_RelocationRecordGroup::applyRelocations(TR_RelocationRuntime *reloRuntime,
       TR_RelocationRecord *reloRecord = TR_RelocationRecord::create(&storage, reloRuntime, reloTarget, recordPointer);
       TR_RelocationErrorCode rc = handleRelocation(reloRuntime, reloTarget, reloRecord, reloOrigin);
       TR::Compilation *comp = reloRuntime->comp();
-      char *changedMethodName = comp->getOptions()->getChangedMethodName();
+      char *changedMethodNamesFile = comp->getOptions()->getchangedMethodNamesFile();
 
       if (/*changedMethodName != NULL || */ rc != TR_RelocationErrorCode::relocationOK)
       {
@@ -844,7 +874,7 @@ TR_RelocationRecordGroup::applyRelocations(TR_RelocationRuntime *reloRuntime,
          aotStats->numRelocationsFailedByType[reloType]++;
          if (reloRuntime->comp()->getOption(TR_RunMyAnalysis) && rc != TR_RelocationErrorCode::inlinedMethodRelocationFailure)
          {
-            bool reuse = testIfCanBeReUsed(reloRuntime, changedMethodName);
+            bool reuse = testIfCanBeReUsed(reloRuntime, changedMethodNamesFile);
 
             if (reuse == CAN_BE_REUSED)
             {
