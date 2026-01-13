@@ -865,7 +865,7 @@ TR_RelocationRecordGroup::applyRelocations(TR_RelocationRuntime *reloRuntime,
       TR::Compilation *comp = reloRuntime->comp();
       char *changedMethodNamesFile = comp->getOptions()->getchangedMethodNamesFile();
 
-      if (/*changedMethodName != NULL || */ rc != TR_RelocationErrorCode::relocationOK)
+      if (changedMethodNamesFile != NULL && rc != TR_RelocationErrorCode::relocationOK)
       {
          uint8_t reloType = recordPointer->type(reloTarget);
          aotStats->numRelocationsFailedByType[reloType]++;
