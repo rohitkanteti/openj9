@@ -854,6 +854,7 @@ TR_RelocationRecordGroup::applyRelocations(TR_RelocationRuntime *reloRuntime,
 
    TR_RelocationRecordBinaryTemplate *recordPointer = firstRecord(reloRuntime, reloTarget);
    TR_RelocationRecordBinaryTemplate *endOfRecords = pastLastRecord(reloTarget);
+   char *changedMethodNamesFile = comp->getOptions()->getchangedMethodNamesFile();
 
    while (recordPointer < endOfRecords)
    {
@@ -863,7 +864,6 @@ TR_RelocationRecordGroup::applyRelocations(TR_RelocationRuntime *reloRuntime,
       TR_RelocationRecord *reloRecord = TR_RelocationRecord::create(&storage, reloRuntime, reloTarget, recordPointer);
       TR_RelocationErrorCode rc = handleRelocation(reloRuntime, reloTarget, reloRecord, reloOrigin);
       TR::Compilation *comp = reloRuntime->comp();
-      char *changedMethodNamesFile = comp->getOptions()->getchangedMethodNamesFile();
 
       if (changedMethodNamesFile != NULL && rc != TR_RelocationErrorCode::relocationOK)
       {
