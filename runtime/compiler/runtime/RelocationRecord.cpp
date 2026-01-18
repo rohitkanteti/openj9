@@ -203,10 +203,12 @@ bool testIfCanBeReUsed(TR_RelocationRuntime *reloRuntime, char *changedMethodNam
    // modified_methods.push_back(modifiedJ9Method);
 
    for(std::string changedMethodName : modified_method_names)
-   {
+   {  
+      std::cout << "Changed : " << changedMethodName << std::endl;
       J9Method* modifiedJ9Method = findMethodByString(reloRuntime,reloRuntime->comp(),changedMethodName.c_str());
-      TR_ASSERT_FATAL(modifiedJ9Method,"Could not get the J9Method for the specified method");
-      modified_methods.push_back(modifiedJ9Method);
+      // TR_ASSERT_FATAL(modifiedJ9Method,"Could not get the J9Method for the specified method");
+      if(modifiedJ9Method)
+          modified_methods.push_back(modifiedJ9Method);
    }
 
    if (modified_methods.size() <= 0)
