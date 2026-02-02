@@ -297,11 +297,11 @@ public:
         return false; // No recompilation needed
     }
 
-    PointerAssignmentGraph *update_PAG(PointerAssignmentGraph *p, int my, J9Method *my_prime_J9Method, CallGraph *CG,string my_full_name)
+    PointerAssignmentGraph *update_PAG(PointerAssignmentGraph *p, int my, J9Method *my_prime_J9Method, CallGraph *CG, string my_full_name)
     {
 
         std::cout << "The index my is = " << my << std::endl;
-        
+
         if (all_loaded_classes.empty())
         {
             getall_loaded_classes(reloRuntime->comp());
@@ -310,7 +310,26 @@ public:
         {
             threadClassesIdentified = true;
             getResolvedReflectiveCalls();
-            getThreadRelatedClasses(reloRuntime->comp());
+            // getThreadRelatedClasses(reloRuntime->comp());
+            std::ifstream inFile("threadRelatedClasses.txt");
+            std::string line;
+
+            if (inFile.is_open())
+            {
+                threadExtendingClasses.clear();
+                while (std::getline(inFile, line))
+                {
+                    if (!line.empty())
+                    {
+                        threadExtendingClasses.insert(line);
+                    }
+                }
+                inFile.close();
+            }
+            else
+            {
+                TR_ASSERT_FATAL(1, "could not open the file threadRelatedClasses.txt");
+            }
         }
         // remove intraprocedural edges [All the edges to formal params are `assign` edges]
         for (PAGNode *f_param : p->getFormalParameterNodes(my))
@@ -377,7 +396,8 @@ public:
 
         // traverse_bytecode(my_prime_J9Method, p, my, reloRuntime->comp());
         PAGNode *comp_type_2 = new PAGNode();
-        comp_type_2->static_type = "COMP TYPE 2";
+        comp_type_2->static_type = "COMP_TYPE_2";
+        comp_type_2->comp_type = "COMP_TYPE_2";
         traverse_cfg(my_prime_J9Method, p, my, comp, new PAGNode(), comp_type_2);
 
         // J9JavaVM* vm = reloRuntime->javaVM();
@@ -531,7 +551,7 @@ public:
 
         queue.push({start_node, {}});
         visited.insert({start_node, {}});
-        
+
         while (!queue.empty())
         {
             auto front = queue.front();
@@ -541,7 +561,7 @@ public:
 
             // Check if current object matches target_obj
             std::unordered_set<PAGNode *> pts_set = p->points_to(current_node);
-            if(pts_set.find(target_obj) != pts_set.end())
+            if (pts_set.find(target_obj) != pts_set.end())
                 return true;
 
             // Explore fields of the current object
@@ -564,7 +584,7 @@ public:
 
                     // Check if this path reaches target_obj
                     std::unordered_set<PAGNode *> pts_set = p->points_to(next_node);
-                    if(pts_set.find(target_obj) != pts_set.end())
+                    if (pts_set.find(target_obj) != pts_set.end())
                         return true;
                 }
             }
@@ -2670,18 +2690,27 @@ public:
         Block *entryBlock = nullptr;
 
         // std::cout << "Resolved method ptr: = " << resolvedMethod << std::endl;
-        char *classNameChars = resolvedMethod->classNameChars();
-        int32_t classNameLength = resolvedMethod->classNameLength();
+        J9ROMMethod *romMethod = J9_ROM_METHOD_FROM_RAM_METHOD(method);
+        J9Class *clazz = J9_CLASS_FROM_CP(J9_CP_FROM_METHOD(method));
+        J9ROMClass *romClass = clazz->romClass;
 
-        char *methodName = resolvedMethod->nameChars();
-        int32_t methodNameLength = resolvedMethod->nameLength();
-        char *methodSignature = resolvedMethod->signatureChars();
-        int32_t methodSignatureLength = resolvedMethod->signatureLength();
+        J9UTF8 *utfMethodName = J9ROMMETHOD_NAME(romMethod);
+        char *methodName = (char *)J9UTF8_DATA(utfMethodName);
+        int32_t methodNameLength = J9UTF8_LENGTH(utfMethodName);
+
+        J9UTF8 *utfSignature = J9ROMMETHOD_SIGNATURE(romMethod);
+        char *methodSignature = (char *)J9UTF8_DATA(utfSignature);
+        int32_t methodSignatureLength = J9UTF8_LENGTH(utfSignature);
+
+        J9UTF8 *utfClassName = J9ROMCLASS_CLASSNAME(romClass);
+        char *classNameChars = (char *)J9UTF8_DATA(utfClassName);
+        int32_t classNameLength = J9UTF8_LENGTH(utfClassName);
 
         std::string name(methodName, methodNameLength);
         std::string className(classNameChars, classNameLength);
         std::string signature(methodSignature, methodSignatureLength);
         std::string returnStaticType;
+
         bool hasReturnType = returnsObject(methodSignature, returnStaticType);
         // _methodsNamesBeingAnalyzed.insert(className + "." + name + signature);
         // if (isLibraryMethod((className + "." + name + signature)))
@@ -2697,23 +2726,46 @@ public:
         // {
         //    std::cout << "Got :" << name << std::endl;
         // }
+        uintptr_t status = clazz->initializeStatus & J9ClassInitStatusMask;
+        if (status == J9ClassInitSucceeded)
+        {
+            std::cout << "Class is intialized!!" << std::endl;
+        }
+        else
+        {
+            std::cout << status <<" Class is not intialized!!"<< std::endl;
+        }
         std::unordered_map<int, PAGNode *> variableMap;
         int reference_params = 0;
+        if ((romMethod->modifiers & J9AccStatic) == 0)
+        {
+            reference_params++;
+        }
+
+        for (int i = 0; i < num_params; i++)
+        {
+            if (is_reference_type(methodSignature, i))
+            {
+                reference_params++;
+            }
+        }
         std::string fullNAME = className + "." + name + signature;
         // Create entries in the varaible Map for each of the parameters and a PAGNode for return node ;
         if (analysedMethodNames.find(fullNAME) == analysedMethodNames.end()) // This means that this method 'my' was not analyzed before or called before.
-        {
-            if (!resolvedMethod->isStatic())
+        {   
+            bool static_node_created_here = false;
+            if ((romMethod->modifiers & J9AccStatic) == 0)
             {
                 PAGNode *param_node_ptr = new PAGNode(VARIABLE, 0, nullptr, method_block, -1, methodIndex, className);
                 // std::cout << "FOR recvr Method index = " << methodIndex << std::endl;
-                if(pag->methodIndex_to_formalNodes.find(methodIndex) == pag->methodIndex_to_formalNodes.end())
-                {
+                if (pag->methodIndex_to_formalNodes.find(methodIndex) == pag->methodIndex_to_formalNodes.end())
+                {   
+                    static_node_created_here = true;
                     pag->methodIndex_to_allMethodNodes[methodIndex].push_back(param_node_ptr);
                     pag->PAG_nodes.insert(param_node_ptr);
                     pag->methodIndex_to_formalNodes[methodIndex].push_back(param_node_ptr);
                 }
-                reference_params++;
+                // reference_params++;
             }
 
             for (int i = 0; i < num_params; i++)
@@ -2721,11 +2773,11 @@ public:
 
                 if (is_reference_type(methodSignature, i))
                 {
-                    reference_params++;
+                    // reference_params++;
                     int slot_num = getSlotForArgument(methodSignature, i);
 
                     std::string static_type = getParameterReferenceType(methodSignature, i);
-                    if(pag->methodIndex_to_formalNodes.find(methodIndex) == pag->methodIndex_to_formalNodes.end())
+                    if (static_node_created_here || pag->methodIndex_to_formalNodes.find(methodIndex) == pag->methodIndex_to_formalNodes.end())
                     {
                         PAGNode *param_node_ptr = new PAGNode(VARIABLE, slot_num, nullptr, method_block, -1, methodIndex, static_type);
                         // std::cout << "for is_reference_type Method index = " << methodIndex << std::endl;
@@ -2752,8 +2804,8 @@ public:
             returnNode = it->second;
         }
 
-        // std::cout << "Formal params size = " << formal_param_nodes.size() << std::endl;
-        if (reference_params != formal_param_nodes.size() || ((hasReturnType && !returnNode) || (!hasReturnType && returnNode)))
+        // std::cout << "Formal params size = " << formal_param_nodes.size() << " reference count="<< reference_params<< std::endl;
+        if (reference_params != formal_param_nodes.size()) // || ((hasReturnType && !returnNode) || (!hasReturnType && returnNode)))
         {
             TR_ASSERT_FATAL(0, "There is a mismatch in the size of paramters maybe the method signature changed.");
         }
@@ -2764,7 +2816,7 @@ public:
             // pag->methodIndex_to_allMethodNodes[methodIndex].push_back(param_node_ptr);
             // pag->PAG_nodes.insert(param_node_ptr);
             // pag->methodIndex_to_formalNodes[methodIndex].push_back(param_node_ptr);
-            if (resolvedMethod->isStatic())
+            if ((romMethod->modifiers & J9AccStatic) != 0)
                 variableMap[(formal_param_nodes[i]->name) - 1] = formal_param_nodes[i];
             else
                 variableMap[formal_param_nodes[i]->name] = formal_param_nodes[i]; // non-static methods, slot 0 -> this
@@ -2789,7 +2841,7 @@ public:
         inStacks[entryBlock] = new operandStack();
         worklist.push(entryBlock);
 
-        J9Class *currentClass = reinterpret_cast<J9Class *>(resolvedMethod->classOfMethod());
+        J9Class *currentClass = J9_CLASS_FROM_METHOD(method); // reinterpret_cast<J9Class *>(resolvedMethod->classOfMethod());
 
         unordered_set<int> worklist_bb_bci;
         worklist_bb_bci.insert(entryBlock->startBCI);
@@ -2816,9 +2868,9 @@ public:
                 // std::cout << pcIndex << " - Opcode: 0x" << std::hex << (int)(*pc) << std::dec << " - " << getBytecodeString(bytecode) << " ---> " << instructionLength << std::endl;
 
                 TR::VMAccessCriticalSection vmAccess(comp);
-                J9VMThread *vm = ((TR_J9VMBase *)comp->fe())->getCurrentVMThread();
-                TR_OpaqueClassBlock *opaqueCurrentClass = resolvedMethod->classOfMethod();
-                J9Class *currentClass = reinterpret_cast<J9Class *>(opaqueCurrentClass);
+                // J9VMThread *vm = ((TR_J9VMBase *)comp->fe())->getCurrentVMThread();
+                // TR_OpaqueClassBlock *opaqueCurrentClass = resolvedMethod->classOfMethod();
+                J9Class *currentClass = J9_CLASS_FROM_METHOD(method); // reinterpret_cast<J9Class *>(opaqueCurrentClass);
                 executeBytecode(bytecode, pc, pag, stack, resolvedMethod, method, methodIndex, pcIndex, variableMap, hasReturnType, comp, currentClass, primitive_node, comp_type2_primitiveNode);
 
                 pcIndex += instructionLength;
