@@ -591,17 +591,17 @@ SH_ROMClassManagerImpl::locateROMClass(J9VMThread *currentThread, const char *pa
 							Trc_SHR_RMI_locateROMClass_ExitRcTimestampChanged(currentThread);
 							// ROM class is found but the timestamp changed. -> The methods of this class are to be deemed changed.
 
-							J9ROMClass *locatedJ9ROMClass = (J9ROMClass *)_cache->getAddressFromJ9ShrOffset(&(match->romClassOffset));
+							// J9ROMClass *locatedJ9ROMClass = (J9ROMClass *)_cache->getAddressFromJ9ShrOffset(&(match->romClassOffset));
 							// J9UTF8* className = J9ROMCLASS_CLASSNAME(locatedJ9ROMClass);
 							// printf("-----match Class name: %.*s----- %d\n", J9UTF8_LENGTH(className), J9UTF8_DATA(className),pathLen);
 							// // listROMClassMethods(locatedJ9ROMClass);
-							modified_ROMClass.insert(locatedJ9ROMClass);
-							FILE *f = std::fopen("modified_ROMClass.txt", "a+");
+							// modified_ROMClass.insert(locatedJ9ROMClass);
+							// FILE *f = std::fopen("modified_ROMClass.txt", "a+");
 							// TR_ASSERT_FATAL(f,"could not open modified_ROMClass.txt to write. ");
 							
-							std::fprintf(f, "%p\n", static_cast<void *>(locatedJ9ROMClass));
+							// std::fprintf(f, "%p\n", static_cast<void *>(locatedJ9ROMClass));
 
-							std::fclose(f);
+							// std::fclose(f);
 							
 
 							return (LOCATE_ROMCLASS_RETURN_MARKED_ITEM_STALE | LOCATE_ROMCLASS_RETURN_NOTFOUND);

@@ -156,6 +156,9 @@ J9Method *findMethodByString(TR_RelocationRuntime *reloRuntime, TR::Compilation 
    return NULL;
 }
 static std::unordered_set<std::string> modified_method_names;
+static std::vector<J9Method *> modified_methods;
+static PointerAssignmentGraph *loaded_pag = nullptr;
+static std::unordered_map<std::string,bool> result_cache;
 bool testIfCanBeReUsed(TR_RelocationRuntime *reloRuntime, char *changedMethodNamesFile)
 {  
    std::string filename_str(changedMethodNamesFile);
@@ -165,7 +168,7 @@ bool testIfCanBeReUsed(TR_RelocationRuntime *reloRuntime, char *changedMethodNam
     if (!file.good())
          return CAN_BE_REUSED; // no method was modified.
 
-   std::vector<J9Method *> modified_methods;
+   
    // FILE* f = std::fopen("modified_ROMClass.txt", "r");
 
    //  char line[512];
@@ -179,41 +182,45 @@ bool testIfCanBeReUsed(TR_RelocationRuntime *reloRuntime, char *changedMethodNam
 
    //  std::fclose(f);
 
-   FILE* f = std::fopen(changedMethodNamesFile, "r");
-   TR_ASSERT_FATAL(f,"Could not open the changed method names file");
+   if(modified_method_names.size()==0)
+   {
+      FILE* f = std::fopen(changedMethodNamesFile, "r");
+      TR_ASSERT_FATAL(f,"Could not open the changed method names file");
 
-   char line[512];
-   while (std::fgets(line, sizeof(line), f)) {
-      std::string line_str(line);
+      char line[512];
+      while (std::fgets(line, sizeof(line), f)) {
+         std::string line_str(line);
 
-     
-      line_str.erase(std::remove(line_str.begin(), line_str.end(), '\n'), line_str.end());
-      line_str.erase(std::remove(line_str.begin(), line_str.end(), '\r'), line_str.end());
+      
+         line_str.erase(std::remove(line_str.begin(), line_str.end(), '\n'), line_str.end());
+         line_str.erase(std::remove(line_str.begin(), line_str.end(), '\r'), line_str.end());
 
-      if (!line_str.empty()) {
-         modified_method_names.insert(line_str);
+         if (!line_str.empty()) {
+            modified_method_names.insert(line_str);
+         }
       }
-   }
 
-   std::fclose(f);
+      std::fclose(f);
+   }
 
    // J9Method* modifiedJ9Method = findMethodByString(reloRuntime,reloRuntime->comp(),changedMethodName);
    // TR_ASSERT_FATAL(modifiedJ9Method,"Could not get the J9Method for the specified method");
 
    // modified_methods.push_back(modifiedJ9Method);
 
-   for(std::string changedMethodName : modified_method_names)
-   {  
-      std::cout << "Changed : " << changedMethodName << std::endl;
-      J9Method* modifiedJ9Method = findMethodByString(reloRuntime,reloRuntime->comp(),changedMethodName.c_str());
-      // TR_ASSERT_FATAL(modifiedJ9Method,"Could not get the J9Method for the specified method");
-      if(modifiedJ9Method)
-          modified_methods.push_back(modifiedJ9Method);
+   if(modified_methods.size()==0)
+   {
+      for(std::string changedMethodName : modified_method_names)
+      {  
+         // std::cout << "Changed : " << changedMethodName << std::endl;
+         J9Method* modifiedJ9Method = findMethodByString(reloRuntime,reloRuntime->comp(),changedMethodName.c_str());
+         // TR_ASSERT_FATAL(modifiedJ9Method,"Could not get the J9Method for the specified method");
+         if(modifiedJ9Method)
+            modified_methods.push_back(modifiedJ9Method);
+      }
    }
 
-   if (modified_methods.size() <= 0)
-      return CAN_BE_REUSED;
-
+   
    // for (auto *modifiedClass : modified_ROMClass)
    // {
    //    J9UTF8 *className = J9ROMCLASS_CLASSNAME(modifiedClass);
@@ -222,20 +229,20 @@ bool testIfCanBeReUsed(TR_RelocationRuntime *reloRuntime, char *changedMethodNam
    //    std::string class_name(classNameData, classNameLength);
    //    modified_methods = getJ9MethodsOfClass(class_name, reloRuntime->comp());
    // }
-
    // Load the PAG
-   std::string nodes = "nodes.txt";
-   std::string edges = "PAGEdges.txt";
-   std::string methods = "methodIndex_to_PAGNodes.txt";
-   std::string callgraph = "callgraph.txt";
-   std::string threadAccess = "threadAccesible.txt";
-   std::string staticFields = "staticFields.txt";
+   if(!loaded_pag)
+   {
+      std::string nodes = "nodes.txt";
+      std::string edges = "PAGEdges.txt";
+      std::string methods = "methodIndex_to_PAGNodes.txt";
+      std::string callgraph = "callgraph.txt";
+      std::string threadAccess = "threadAccesible.txt";
+      std::string staticFields = "staticFields.txt";
 
-   LoadPAG loader(nodes, edges, methods, callgraph, threadAccess, staticFields);
+      LoadPAG loader(nodes, edges, methods, callgraph, threadAccess, staticFields);
 
-   PointerAssignmentGraph *loaded_pag = loader.getPAG();
-
-   // writeNodesToFile(reloRuntime->comp(),loaded_pag);
+      loaded_pag = loader.getPAG();
+   }
 
    recompilation_test rec_test;
    rec_test.reloRuntime = reloRuntime;
@@ -260,6 +267,18 @@ bool testIfCanBeReUsed(TR_RelocationRuntime *reloRuntime, char *changedMethodNam
 
    std::string mx_methodSignature = classNameStr + "." + name + signature; // reloRuntime->currentResolvedMethod()->findOrCreateJittedMethodSymbol(comp)->signature(comp->trMemory());
    int mx = loaded_pag->_methodIndices[mx_methodSignature];
+
+   if(result_cache.find(mx_methodSignature) != result_cache.end())
+   {
+      return result_cache[mx_methodSignature];
+   }
+
+   if (modified_methods.size() <= 0)
+      return result_cache[mx_methodSignature] = CAN_BE_REUSED;
+
+
+   // writeNodesToFile(reloRuntime->comp(),loaded_pag);
+
    // if(methodIndex_to_CanItBeResused.find(mx) != methodIndex_to_CanItBeResused.end())
    // {
    //    if(methodIndex_to_CanItBeResused[mx] == REUSE) return CAN_BE_REUSED;
@@ -309,7 +328,7 @@ bool testIfCanBeReUsed(TR_RelocationRuntime *reloRuntime, char *changedMethodNam
          std::string cNameStr(cName, cNameLength);
 
          std::string my_methodSignature = cNameStr + "." + Mname + Msignature;
-         std::cout << " my_methodSignature = " << my_methodSignature << std::endl;
+         // std::cout << " my_methodSignature = " << my_methodSignature << std::endl;
 
          if (analysedMethodNames.empty())
          {
@@ -337,22 +356,22 @@ bool testIfCanBeReUsed(TR_RelocationRuntime *reloRuntime, char *changedMethodNam
 
          block_to_int[method_block] = my;
          updated_pag = rec_test.update_PAG(updated_pag, my, modifed_method, &(updated_pag->CG),my_methodSignature);
-         std::cout << "updated_pag size = " << updated_pag->PAG_nodes.size() << std::endl;
-         std::cout << "loaded_pag size = " << loaded_pag->PAG_nodes.size() << std::endl;
+         // std::cout << "updated_pag size = " << updated_pag->PAG_nodes.size() << std::endl;
+         // std::cout << "loaded_pag size = " << loaded_pag->PAG_nodes.size() << std::endl;
       }
    }
    // test for each of the modified method
-   std::cout << "Testing index = " << mx << std::endl;
+   // std::cout << "Testing index = " << mx << std::endl;
    bool recompile = rec_test.should_recompile(mx, updated_pag, allocs, escapes);
 
    if (recompile)
    {
-      std::cout << "Need to recompile: " << reloRuntime->comp()->signature() << std::endl;
+      // std::cout << "Need to recompile: " << reloRuntime->comp()->signature() << std::endl;
       methodIndex_to_CanItBeResused[mx] = RECOMPILE;
-      return NEED_TO_RECOMPILE;
+      return result_cache[mx_methodSignature] = NEED_TO_RECOMPILE;
    }
    methodIndex_to_CanItBeResused[mx] = REUSE;
-   return CAN_BE_REUSED;
+   return result_cache[mx_methodSignature] = CAN_BE_REUSED;
 }
 
 std::vector<J9Method *> getJ9MethodsOfClass(const std::string &class_name, TR::Compilation *comp)
@@ -857,7 +876,6 @@ TR_RelocationRecordGroup::applyRelocations(TR_RelocationRuntime *reloRuntime,
    TR_RelocationRecordBinaryTemplate *recordPointer = firstRecord(reloRuntime, reloTarget);
    TR_RelocationRecordBinaryTemplate *endOfRecords = pastLastRecord(reloTarget);
    TR::Compilation *comp = reloRuntime->comp();
-   char *changedMethodNamesFile = comp->getOptions()->getchangedMethodNamesFile();
 
    while (recordPointer < endOfRecords)
    {
@@ -868,11 +886,13 @@ TR_RelocationRecordGroup::applyRelocations(TR_RelocationRuntime *reloRuntime,
       TR_RelocationErrorCode rc = handleRelocation(reloRuntime, reloTarget, reloRecord, reloOrigin);
       
 
-      if (changedMethodNamesFile != NULL && rc != TR_RelocationErrorCode::relocationOK)
+      if (rc != TR_RelocationErrorCode::relocationOK)
       {
          uint8_t reloType = recordPointer->type(reloTarget);
          aotStats->numRelocationsFailedByType[reloType]++;
-         if (reloRuntime->comp()->getOption(TR_RunMyAnalysis) && rc != TR_RelocationErrorCode::inlinedMethodRelocationFailure)
+         char *changedMethodNamesFile = comp->getOptions()->getchangedMethodNamesFile();
+
+         if (changedMethodNamesFile != NULL && reloRuntime->comp()->getOption(TR_RunMyAnalysis) && rc != TR_RelocationErrorCode::inlinedMethodRelocationFailure)
          {
             bool reuse = testIfCanBeReUsed(reloRuntime, changedMethodNamesFile);
 
@@ -895,13 +915,13 @@ TR_RelocationRecordGroup::applyRelocations(TR_RelocationRuntime *reloRuntime,
 
                std::string classNameStr(className, classNameLength);
 
-               std::cout << "1. Need not to recompile and can be reused " << className << "." << name << signature << std::endl; //<< reloRuntime->currentResolvedMethod()->findOrCreateJittedMethodSymbol(comp)->signature(comp->trMemory()) << std::endl;
+               // std::cout << "1. Need not to recompile and can be reused " << className << "." << name << signature << std::endl; //<< reloRuntime->currentResolvedMethod()->findOrCreateJittedMethodSymbol(comp)->signature(comp->trMemory()) << std::endl;
                // return TR_RelocationErrorCode::relocationOK;
                goto OK;
             }
             else
             {
-               std::cout << "Cannot be reused!!\n";
+               // std::cout << "Cannot be reused!!\n";
             }
          }
 

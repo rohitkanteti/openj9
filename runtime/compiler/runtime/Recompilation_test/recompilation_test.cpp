@@ -190,7 +190,7 @@ CFG *buildCFG(TR_OpaqueMethodBlock *method_block, TR::Compilation *comp, std::ma
 
         uint8_t *lastPc = (uint8_t *)(methodStart + lastInstrStart);
 
-        // std::cout << "BASIC BLOCK START BCI=" << block->getEntry()->getNode()->getByteCodeIndex() << " Last Instruction= " << lastInstrStart << " - " << getBytecodeString(lastBc) << std::endl;
+        //// std::cout << "BASIC BLOCK START BCI=" << block->getEntry()->getNode()->getByteCodeIndex() << " Last Instruction= " << lastInstrStart << " - " << getBytecodeString(lastBc) << std::endl;
 
         // Add edges based on the last instruction of the block
         if (isBranch(lastBc))
@@ -205,14 +205,14 @@ CFG *buildCFG(TR_OpaqueMethodBlock *method_block, TR::Compilation *comp, std::ma
         else if (isSwitch(lastBc))
         {
             auto tgts = switchTargets(lastInstrStart, lastBc, lastPc);
-            // std::cout << "switch targets = ";
+            //// std::cout << "switch targets = ";
             for (auto t : tgts)
             {
-                std::cout << t << ",";
+                // std::cout << t << ",";
                 if (blocks.count(t))
                     cfg->addEdge(block, blocks[t]);
             }
-            std::cout << std::endl;
+            // std::cout << std::endl;
         }
         else if (!isReturnOrThrow(lastBc))
         {
@@ -240,13 +240,13 @@ public:
 
         if (pag->_methodIndices.find(methodName) != pag->_methodIndices.end())
         {
-            std::cout << "Found in the method indices " << methodName << std::endl;
+            // std::cout << "Found in the method indices " << methodName << std::endl;
             return pag->_methodIndices[methodName];
         }
 
         int index = pag->_methodIndices.size() + 1;
         pag->_methodIndices[methodName] = index;
-        std::cout << "Inserted in the method indices " << methodName << std::endl;
+        // std::cout << "Inserted in the method indices " << methodName << std::endl;
 
         return index;
     }
@@ -260,6 +260,7 @@ public:
         // auto old_escaping_objects = p->getEscapingObjects(mx);
 
         // Get leaky nodes in the updated PAG p'
+
         auto leaky_nodes = p_prime->getLeakyNodes();
 
         for (PAGEdge *alloc_edge : old_allocated_edges)
@@ -300,7 +301,7 @@ public:
     PointerAssignmentGraph *update_PAG(PointerAssignmentGraph *p, int my, J9Method *my_prime_J9Method, CallGraph *CG, string my_full_name)
     {
 
-        std::cout << "The index my is = " << my << std::endl;
+        // std::cout << "The index my is = " << my << std::endl;
 
         if (all_loaded_classes.empty())
         {
@@ -341,7 +342,7 @@ public:
         // {
         //     for (auto cs : CG->getCallSites(caller, my))
         //     {
-        //         std::cout << "caller= " << caller << "cs= " << cs << std::endl;
+        //        // std::cout << "caller= " << caller << "cs= " << cs << std::endl;
 
         //         PAGNode *ret_my = p->getReturnNode(my);
         //         if (ret_my != NULL)
@@ -349,7 +350,7 @@ public:
         //             // remove edge from the x labelled by the callsite cs
         //             int nodeIndex = p->callsite_to_storeNodeIndex[cs];
         //             PAGNode *x = p->nodeIndexToNode[nodeIndex];
-        //             std::cout << x << std::endl;
+        //            // std::cout << x << std::endl;
         //             if (x)
         //             {
         //                 p->removeEdgeFrom(x, cs); // check this !!
@@ -529,10 +530,10 @@ public:
         // {
         //     for(auto* ob : objs)
         //     {
-        //         std::cout << "ob "<< ob << std::endl;
+        //        // std::cout << "ob "<< ob << std::endl;
         //     }
-        //     std::cout << "target ob " <<  target_obj << std::endl;
-        //     std::cout << "start node   " <<  start_node << std::endl;
+        //    // std::cout << "target ob " <<  target_obj << std::endl;
+        //    // std::cout << "start node   " <<  start_node << std::endl;
 
         // }
         if (objs.find(target_obj) != objs.end())
@@ -616,10 +617,10 @@ public:
     //         bool hasReturnType = returnsObject(methodSignature);
     //         if(isLibraryMethod((className+"."+name+signature)))
     //         {
-    //             std::cout << "############## SKIPPED Traversing the Bytecode of the method " << className << "." << name << signature << "##############" << std::endl;
+    //            // std::cout << "############## SKIPPED Traversing the Bytecode of the method " << className << "." << name << signature << "##############" << std::endl;
     //             return;
     //         }
-    //         std::cout << "############## Traversing the Bytecode of the method " << className << "." << name << signature << "##############" << std::endl;
+    //        // std::cout << "############## Traversing the Bytecode of the method " << className << "." << name << signature << "##############" << std::endl;
     //         int num_params = count_parameters(methodSignature); // resolvedMethod->numberOfParameterSlots(); double or long takes 2 slots so cannot realy on this
     //         std::unordered_map<int, PAGNode *> variableMap;
     //         int reference_params = 0;
@@ -633,7 +634,7 @@ public:
     //                 {
     //                     reference_params++;
     //                     PAGNode *param_node_ptr = new PAGNode(VARIABLE, i, nullptr, method_block, -1, methodIndex);
-    //                     std::cout << "Method index = " << methodIndex << std::endl;
+    //                    // std::cout << "Method index = " << methodIndex << std::endl;
     //                     pag->methodIndex_to_allMethodNodes[methodIndex].push_back(param_node_ptr);
     //                     pag->PAG_nodes.insert(param_node_ptr);
     //                     pag->methodIndex_to_formalNodes[methodIndex].push_back(param_node_ptr);
@@ -642,7 +643,7 @@ public:
     //             if (!resolvedMethod->isStatic())
     //             {
     //                 PAGNode *param_node_ptr = new PAGNode(VARIABLE,3550, nullptr, method_block, -1, methodIndex);
-    //                 std::cout << "Method index = " << methodIndex << std::endl;
+    //                // std::cout << "Method index = " << methodIndex << std::endl;
     //                 pag->methodIndex_to_allMethodNodes[methodIndex].push_back(param_node_ptr);
     //                 pag->PAG_nodes.insert(param_node_ptr);
     //                 pag->methodIndex_to_formalNodes[methodIndex].push_back(param_node_ptr);
@@ -663,7 +664,7 @@ public:
     //             returnNode = it->second;
     //         }
 
-    //         std::cout << "Formal params size = " << formal_param_nodes.size() << std::endl;
+    //        // std::cout << "Formal params size = " << formal_param_nodes.size() << std::endl;
     //         if (reference_params != formal_param_nodes.size() || ((hasReturnType && !returnNode) || (!hasReturnType && returnNode)))
     //         {
     //             throw std::runtime_error("There is a mismatch in the size of paramters maybe the method signature changed.");
@@ -697,7 +698,7 @@ public:
 
     //             TR_J9ByteCode bytecode = TR_J9ByteCodeIterator::convertOpCodeToByteCodeEnum(*pc);
     //             int32_t instructionLength = getInstructionLength(bytecode, pc);
-    //             std::cout << "  [" << statementCount << "] PC: " << currentIndex
+    //            // std::cout << "  [" << statementCount << "] PC: " << currentIndex
     //                       << " - Opcode: 0x" << std::hex << (int)(*pc) << std::dec
     //                       << " - " << getBytecodeString(bytecode) << " ---> " << instructionLength << std::endl;
 
@@ -709,7 +710,7 @@ public:
     //             //     uint32_t classNamelength = 0;
     //             //     char *classNameChars = resolvedMethod->getClassNameFromConstantPool(cpIndex, classNamelength);
     //             //     std::string className(classNameChars, classNamelength);
-    //             //     std::cout << "  -> Create an object of type: " << className << std::endl;
+    //             //    // std::cout << "  -> Create an object of type: " << className << std::endl;
     //             // }
 
     //             // if (bytecode == J9BCgetfield || bytecode == J9BCputfield)
@@ -730,9 +731,9 @@ public:
     //             //     // int classNamelength = 0;
     //             //     // const char *className = resolvedMethod->classNameOfFieldOrStatic(cpIndex,classNamelength);
 
-    //             //     std::cout << "  -> Access the field: " << signature << "." << fieldName;
+    //             //    // std::cout << "  -> Access the field: " << signature << "." << fieldName;
     //             // }
-    //             // std::cout << std::endl;
+    //             //// std::cout << std::endl;
 
     //             currentIndex += instructionLength;
     //             globalIndex++;
@@ -753,8 +754,8 @@ public:
     //         int32_t methodSize = TR::Compiler->mtd.bytecodeSize(method);
     //         uintptr_t methodStart = TR::Compiler->mtd.bytecodeStart(method);
 
-    //         std::cout << "Bytecode size: " << methodSize << " bytes" << " - number of parameters = " << resolvedMethod->numberOfParameterSlots() << std::endl;
-    //         std::cout << "Bytecode statements:" << std::endl;
+    //        // std::cout << "Bytecode size: " << methodSize << " bytes" << " - number of parameters = " << resolvedMethod->numberOfParameterSlots() << std::endl;
+    //        // std::cout << "Bytecode statements:" << std::endl;
 
     //         int32_t currentIndex = 0;
     //         int statementCount = 0;
@@ -768,7 +769,7 @@ public:
 
     //             TR_J9ByteCode bytecode = TR_J9ByteCodeIterator::convertOpCodeToByteCodeEnum(*pc);
 
-    //             std::cout << "  [" << statementCount << "] PC: " << currentIndex
+    //            // std::cout << "  [" << statementCount << "] PC: " << currentIndex
     //                       << " - Opcode: 0x" << std::hex << (int)(*pc) << std::dec
     //                       << " - " << getBytecodeString(bytecode); //<< "--- cpIndex = " << static_cast<int>((pc[2] << 8) | pc[1]);
     //             if (bytecode == J9BCnew)
@@ -777,16 +778,16 @@ public:
     //                 uint32_t classNamelength = 0;
     //                 char *classNameChars = resolvedMethod->getClassNameFromConstantPool(cpIndex, classNamelength);
     //                 std::string className(classNameChars, classNamelength);
-    //                 std::cout << "  -> Create an object of type: " << className << std::endl;
+    //                // std::cout << "  -> Create an object of type: " << className << std::endl;
     //             }
     //             else if (bytecode == J9BCinvokevirtual)
     //             {
     //                 uint16_t cpIndex = (pc[1] << 8) | pc[2];
-    //                 std::cout << "opcode = 0x"
+    //                // std::cout << "opcode = 0x"
     //                           << std::hex << +pc[0]
     //                           << std::dec << std::endl;
 
-    //                 std::cout << "\npc[1] = " << static_cast<int>(pc[1])
+    //                // std::cout << "\npc[1] = " << static_cast<int>(pc[1])
     //                           << ", pc[2] = " << static_cast<int>(pc[2])
     //                           << ", (pc[1]<<8)|(pc[2]) = "
     //                           << (static_cast<int>(pc[1]) << 8 | static_cast<int>(pc[2]))
@@ -794,12 +795,12 @@ public:
 
     //                 uint classNameLength = 0;
     //                 const char *className = resolvedMethod->getClassNameFromConstantPool(cpIndex, classNameLength);
-    //                 std::cout << " ClassName is " << className << " CpIndex is " << cpIndex << std::endl;
+    //                // std::cout << " ClassName is " << className << " CpIndex is " << cpIndex << std::endl;
     //                 // Get the name of the target method itself.
     //                 J9ConstantPool *cp = J9_CP_FROM_METHOD(reinterpret_cast<J9Method *>(resolvedMethod));
 
     //                 J9ROMMethodRef *romMethodRef = (J9ROMMethodRef *)(cp->romConstantPool + cpIndex);
-    //                 // std::cout << romMethodRef << std::endl;
+    //                 //// std::cout << romMethodRef << std::endl;
     //                 J9ROMNameAndSignature *nameAndSig = J9ROMMETHODREF_NAMEANDSIGNATURE(romMethodRef); //(J9ROMNameAndSignature*) romMethodRef->nameAndSignature;
 
     //                 //((struct J9ROMNameAndSignature*) (((uint8_t *) &((romMethodRef)->nameAndSignature)) + (J9SRP)((romMethodRef)->nameAndSignature)));//J9ROMMETHODREF_NAMEANDSIGNATURE(romMethodRef);
@@ -815,12 +816,12 @@ public:
     //                 char *methodName = (char *)J9UTF8_DATA(name);
     //                 U_16 methodNameLength = J9UTF8_LENGTH(name);
     //                 std::string mName(methodName, methodNameLength);
-    //                 std::cout << "    -> Method:" << mName << std::endl;
+    //                // std::cout << "    -> Method:" << mName << std::endl;
 
     //                 char *sigChars = (char *)J9UTF8_DATA(signature);
     //                 U_16 sigLength = J9UTF8_LENGTH(signature);
     //                 std::string sig(sigChars, sigLength);
-    //                 std::cout << "    -> signature:" << sig << std::endl;
+    //                // std::cout << "    -> signature:" << sig << std::endl;
 
     //                 // // Extract method signature
     //                 // J9UTF8 *sigUTF8 = J9ROMNAMEANDSIGNATURE_SIGNATURE(nameAndSig);
@@ -849,16 +850,16 @@ public:
     //                 // int classNamelength = 0;
     //                 // const char *className = resolvedMethod->classNameOfFieldOrStatic(cpIndex,classNamelength);
 
-    //                 std::cout << "  -> Access the field: " << signature << "." << fieldName;
+    //                // std::cout << "  -> Access the field: " << signature << "." << fieldName;
     //             }
-    //             std::cout << std::endl;
+    //            // std::cout << std::endl;
 
     //             int32_t instructionLength = getInstructionLength(bytecode, pc);
     //             currentIndex += instructionLength;
     //             statementCount++;
     //         }
 
-    //         std::cout << "Total statements: " << statementCount << std::endl;
+    //        // std::cout << "Total statements: " << statementCount << std::endl;
     //     }
 
     //     const char *getBytecodeString(TR_J9ByteCode bytecode)
@@ -1986,7 +1987,7 @@ public:
 
     //                 PAGNode *obj_ref = stack->popRef();
     //                 PAGNode *return_pag_node_ptr = pag->methodIndex_to_returnNode[methodIndex];
-    //                 std::cout << methodIndex << " " << return_pag_node_ptr << std::endl;
+    //                // std::cout << methodIndex << " " << return_pag_node_ptr << std::endl;
     //                 pag->addEdge(obj_ref, return_pag_node_ptr, ASSIGN);
 
     //                 return_pag_node_ptr->pointee_class_names.insert(obj_ref->pointee_class_names.begin(), obj_ref->pointee_class_names.end());
@@ -2036,7 +2037,7 @@ public:
     //         {
     //             PAGNode *obj_ref = stack->popRef();
     //             int index = pc[1];
-    //             std::cout << " " << index;
+    //            // std::cout << " " << index;
     //             if (!variableMap[index])
     //             {
     //                 variableMap[index] = new PAGNode(VARIABLE, globalIndex, nullptr, method_block, bci, methodIndex);
@@ -2089,7 +2090,7 @@ public:
     //             int fieldNameLength = 0;
     //             const char *fieldNameChars = resolvedMethod->fieldNameChars(cpIndex, fieldNameLength);
     //             std::string fieldName(fieldNameChars, fieldNameLength);
-    //             std::cout << "  -> fieldName= " << fieldName << std::endl;
+    //            // std::cout << "  -> fieldName= " << fieldName << std::endl;
 
     //             PAGNode *temp_node_ptr = new PAGNode(VARIABLE, globalIndex, nullptr, method_block, bci, methodIndex);
     //             pag->PAG_nodes.insert(temp_node_ptr);
@@ -2143,8 +2144,8 @@ public:
 
     //             std::string fieldName(fieldNameChars, fieldNameLength);
 
-    //             std::cout << "  ->className in putfield " << className << std::endl;
-    //             std::cout << "  -> fieldName= " << fieldName << std::endl;
+    //            // std::cout << "  ->className in putfield " << className << std::endl;
+    //            // std::cout << "  -> fieldName= " << fieldName << std::endl;
     //             std::string fullName = className + "." + fieldName;
     //             PAGNode *value = stack->popRef();
 
@@ -2186,7 +2187,7 @@ public:
     //         }
     //             // case J9BCinvokevirtual:
     //             // {
-    //             //     std::cout << "invokevirtual: cpIndex " << static_cast<int>((pc[2] << 8) | pc[1]) << std::endl;
+    //             //    // std::cout << "invokevirtual: cpIndex " << static_cast<int>((pc[2] << 8) | pc[1]) << std::endl;
     //             //     // J9Method *j9method = jitResolveSpecialMethodRef(((TR_J9VMBase *)comp->fe())->getCurrentVMThread(),
     //             //     //                                                 J9_CP_FROM_METHOD(reinterpret_cast<J9Method *>(resolvedMethod)), cpIndex, J9_RESOLVE_FLAG_JIT_COMPILE_TIME);
     //             //     J9Method *j9method;
@@ -2196,7 +2197,7 @@ public:
     //             //     J9RAMSpecialMethodRef *ramSpecialMethodRef = (J9RAMSpecialMethodRef *)&cp[cpIndex];
     //             //     J9Method *ramMethod = ramSpecialMethodRef->method;
     //             //     TR_ResolvedMethod* res = reinterpret_cast<TR_ResolvedMethod *>(ramMethod);
-    //             //     // std::cout << "The params slots are: " << res->numberOfParameterSlots() << std::endl;
+    //             //     //// std::cout << "The params slots are: " << res->numberOfParameterSlots() << std::endl;
 
     //             //     break;
     //             // }
@@ -2209,7 +2210,7 @@ public:
     //         case J9BCinvokespecial:
     //         {
 
-    //             std::cout << "invokespecial/invokevirtual: cpIndex " << cpIndex << std::endl;
+    //            // std::cout << "invokespecial/invokevirtual: cpIndex " << cpIndex << std::endl;
     //             uint len = 0;
     //             J9Method *j9method;
 
@@ -2231,7 +2232,7 @@ public:
     //             U_16 nameLength = J9UTF8_LENGTH(name_utf8);
     //             std::string name(nameChars, nameLength);
 
-    //             std::cout << "   -> " << name << signature << " is the method!!!" << std::endl;
+    //            // std::cout << "   -> " << name << signature << " is the method!!!" << std::endl;
     //             // methodName along with signature;
     //             string methodName = name + signature;
 
@@ -2263,7 +2264,7 @@ public:
     //                 std::string className(classNameChars, classNameLength);
 
     //                 // U_32 classRefIndex = romMethodRef->classRefCPIndex;
-    //                 // std::cout << "classRefIndex = " << classRefIndex << std::endl;
+    //                 //// std::cout << "classRefIndex = " << classRefIndex << std::endl;
     //                 // // J9ROMClassRef *romClassRef = (J9ROMClassRef *)(cp + classRefIndex);
     //                 // J9ROMConstantPoolItem *romCPItem_class = &(J9_ROM_CP_FROM_CP(J9_CP_FROM_METHOD(currentMethod))[classRefIndex]);
 
@@ -2284,7 +2285,7 @@ public:
     //                 // int classNameLength = J9UTF8_LENGTH(classNameWrapper);
     //                 // char * classNameChars = (char*) J9UTF8_DATA(classNameWrapper);
     //                 // std::string className(classNameChars, classNameLength);
-    //                 std::cout << "  ->invokestatic className  " << className << std::endl;
+    //                // std::cout << "  ->invokestatic className  " << className << std::endl;
 
     //                 bool found = searchForOveridingMethodsInClass(className, name, signature, pag, ((TR_J9VMBase *)comp->fe()), resolvedMethod, actual_params, bci, comp);
     //             }
@@ -2311,7 +2312,7 @@ public:
 
     //                     std::string full_name = className + "." + name + signature;
     //                     std::string staticName = staticClassName + "." + name + signature;
-    //                     std::cout << "full_name = " << full_name << "Stt = " << staticName << std::endl;
+    //                    // std::cout << "full_name = " << full_name << "Stt = " << staticName << std::endl;
     //                     if (staticName.rfind("java/lang/Object.<init>()") == 0)
     //                         break;
 
@@ -2387,7 +2388,7 @@ public:
     //             uint32_t classNamelength = 0;
     //             char *classNameChars = resolvedMethod->getClassNameFromConstantPool(cpIndex, classNamelength);
     //             std::string className(classNameChars, classNamelength);
-    //             std::cout << "  -> Create an object of type: " << className << std::endl;
+    //            // std::cout << "  -> Create an object of type: " << className << std::endl;
 
     //             PAGNode *obj_ptr = new PAGNode(OBJECT, -1, nullptr, method_block, bci, methodIndex);
     //             pag->PAG_nodes.insert(obj_ptr);
@@ -2442,7 +2443,7 @@ public:
     //         for (U_32 i = 0; i < romClass->romMethodCount; i++)
     //         {
     //             J9Method *ramMethod = &j9Class->ramMethods[i];
-    //             // std::cout << "Method added is: " ;
+    //             //// std::cout << "Method added is: " ;
     //             TR_OpaqueMethodBlock *method_block = reinterpret_cast<TR_OpaqueMethodBlock *>(ramMethod);
     //             TR_ResolvedMethod *resolved_Method = comp->fe()->createResolvedMethod(comp->trMemory(), method_block, 0);
 
@@ -2478,7 +2479,7 @@ public:
     //                 return true;
     //             }
 
-    //             // std::cout << std::string(className, classNameLength)
+    //             //// std::cout << std::string(className, classNameLength)
     //             //         << "." << std::string(methodName, methodNameLength)
     //             //         << std::string(signature, signatureLength) << std::endl;
     //         }
@@ -2528,7 +2529,7 @@ public:
     bool is_reference_type(const char *signature, int argumentIndex)
     {
         int idx = 0;
-        // std::cout << "Argument index is : " << argumentIndex << std::endl;
+        //// std::cout << "Argument index is : " << argumentIndex << std::endl;
         const char *p = strchr(signature, '(') + 1;
         while (*p && *p != ')')
         {
@@ -2604,7 +2605,7 @@ public:
 
     void getall_loaded_classes(TR::Compilation *comp)
     {
-        // std::cout << "All the loaded classes are: " << std::endl;
+        //// std::cout << "All the loaded classes are: " << std::endl;
         J9VMThread *vmThread = ((TR_J9VMBase *)comp->fe())->getCurrentVMThread();
         J9JavaVM *javaVM = vmThread->javaVM;
         TR::VMAccessCriticalSection criticalSection(comp);
@@ -2668,7 +2669,7 @@ public:
             for (J9ITable *iTableCur = TR::Compiler->cls.iTableOf(type); iTableCur; iTableCur = iTableCur->next)
             {
                 // CHA[(TR_OpaqueClassBlock *)iTableCur->interfaceClass].insert(type);
-                // std::cout << TR::Compiler->cls.classSignature(comp, (TR_OpaqueClassBlock *)iTableCur->interfaceClass, comp->trMemory()) << "---->" << TR::Compiler->cls.classSignature(comp, type, comp->trMemory()) << std::endl;
+                //// std::cout << TR::Compiler->cls.classSignature(comp, (TR_OpaqueClassBlock *)iTableCur->interfaceClass, comp->trMemory()) << "---->" << TR::Compiler->cls.classSignature(comp, type, comp->trMemory()) << std::endl;
                 std::string superClassName = TR::Compiler->cls.classSignature(comp, (TR_OpaqueClassBlock *)iTableCur->interfaceClass, comp->trMemory());
                 if (superClassName.rfind("Ljava/lang/Runnable") == 0)
                 {
@@ -2689,7 +2690,7 @@ public:
         std::map<int32_t, Block *> blocks;
         Block *entryBlock = nullptr;
 
-        // std::cout << "Resolved method ptr: = " << resolvedMethod << std::endl;
+        //// std::cout << "Resolved method ptr: = " << resolvedMethod << std::endl;
         J9ROMMethod *romMethod = J9_ROM_METHOD_FROM_RAM_METHOD(method);
         J9Class *clazz = J9_CLASS_FROM_CP(J9_CP_FROM_METHOD(method));
         J9ROMClass *romClass = clazz->romClass;
@@ -2715,26 +2716,26 @@ public:
         // _methodsNamesBeingAnalyzed.insert(className + "." + name + signature);
         // if (isLibraryMethod((className + "." + name + signature)))
         // {
-        //    std::cout << "############## SKIPPED Traversing the Bytecode of the method " << className << "." << name << signature << "##############" << std::endl;
+        //   // std::cout << "############## SKIPPED Traversing the Bytecode of the method " << className << "." << name << signature << "##############" << std::endl;
 
         //    return;
         // }
 
-        std::cout << "############## Traversing the Bytecode of the method " << className << "." << name << signature << "##############" << std::endl;
+        // std::cout << "############## Traversing the Bytecode of the method " << className << "." << name << signature << "##############" << std::endl;
         int num_params = count_parameters(methodSignature); // resolvedMethod->numberOfParameterSlots(); double or long takes 2 slots
         // if(name.rfind("outputIntervalHistogram")==0)
         // {
-        //    std::cout << "Got :" << name << std::endl;
+        //   // std::cout << "Got :" << name << std::endl;
         // }
-        uintptr_t status = clazz->initializeStatus & J9ClassInitStatusMask;
-        if (status == J9ClassInitSucceeded)
-        {
-            std::cout << "Class is intialized!!" << std::endl;
-        }
-        else
-        {
-            std::cout << status <<" Class is not intialized!!"<< std::endl;
-        }
+        // uintptr_t status = clazz->initializeStatus & J9ClassInitStatusMask;
+        // if (status == J9ClassInitSucceeded)
+        // {
+        //    // std::cout << "Class is intialized!!" << std::endl;
+        // }
+        // else
+        // {
+        //    // std::cout << status <<" Class is not intialized!!"<< std::endl;
+        // }
         std::unordered_map<int, PAGNode *> variableMap;
         int reference_params = 0;
         if ((romMethod->modifiers & J9AccStatic) == 0)
@@ -2752,14 +2753,14 @@ public:
         std::string fullNAME = className + "." + name + signature;
         // Create entries in the varaible Map for each of the parameters and a PAGNode for return node ;
         if (analysedMethodNames.find(fullNAME) == analysedMethodNames.end()) // This means that this method 'my' was not analyzed before or called before.
-        {   
+        {
             bool static_node_created_here = false;
             if ((romMethod->modifiers & J9AccStatic) == 0)
             {
                 PAGNode *param_node_ptr = new PAGNode(VARIABLE, 0, nullptr, method_block, -1, methodIndex, className);
-                // std::cout << "FOR recvr Method index = " << methodIndex << std::endl;
+                //// std::cout << "FOR recvr Method index = " << methodIndex << std::endl;
                 if (pag->methodIndex_to_formalNodes.find(methodIndex) == pag->methodIndex_to_formalNodes.end())
-                {   
+                {
                     static_node_created_here = true;
                     pag->methodIndex_to_allMethodNodes[methodIndex].push_back(param_node_ptr);
                     pag->PAG_nodes.insert(param_node_ptr);
@@ -2768,17 +2769,19 @@ public:
                 // reference_params++;
             }
 
-            for (int i = 0; i < num_params; i++)
+            if (static_node_created_here || pag->methodIndex_to_formalNodes.find(methodIndex) == pag->methodIndex_to_formalNodes.end())
             {
 
-                if (is_reference_type(methodSignature, i))
+                for (int i = 0; i < num_params; i++)
                 {
-                    // reference_params++;
-                    int slot_num = getSlotForArgument(methodSignature, i);
 
-                    std::string static_type = getParameterReferenceType(methodSignature, i);
-                    if (static_node_created_here || pag->methodIndex_to_formalNodes.find(methodIndex) == pag->methodIndex_to_formalNodes.end())
+                    if (is_reference_type(methodSignature, i))
                     {
+                        // reference_params++;
+                        int slot_num = getSlotForArgument(methodSignature, i);
+
+                        std::string static_type = getParameterReferenceType(methodSignature, i);
+
                         PAGNode *param_node_ptr = new PAGNode(VARIABLE, slot_num, nullptr, method_block, -1, methodIndex, static_type);
                         // std::cout << "for is_reference_type Method index = " << methodIndex << std::endl;
                         pag->methodIndex_to_allMethodNodes[methodIndex].push_back(param_node_ptr);
@@ -2787,7 +2790,6 @@ public:
                     }
                 }
             }
-
             if (hasReturnType && (pag->methodIndex_to_returnNode.find(methodIndex) == pag->methodIndex_to_returnNode.end()))
             {
                 pag->methodIndex_to_returnNode[methodIndex] = new PAGNode(RETURN, RETURN_NODE_NAME, NULL, method_block, -1, methodIndex);
@@ -2804,7 +2806,7 @@ public:
             returnNode = it->second;
         }
 
-        // std::cout << "Formal params size = " << formal_param_nodes.size() << " reference count="<< reference_params<< std::endl;
+        //// std::cout << "Formal params size = " << formal_param_nodes.size() << " reference count="<< reference_params<< std::endl;
         if (reference_params != formal_param_nodes.size()) // || ((hasReturnType && !returnNode) || (!hasReturnType && returnNode)))
         {
             TR_ASSERT_FATAL(0, "There is a mismatch in the size of paramters maybe the method signature changed.");
@@ -2865,7 +2867,7 @@ public:
                 TR_J9ByteCode bytecode = TR_J9ByteCodeIterator::convertOpCodeToByteCodeEnum(*pc);
                 int32_t instructionLength = getInstructionLength(bytecode, pc);
 
-                // std::cout << pcIndex << " - Opcode: 0x" << std::hex << (int)(*pc) << std::dec << " - " << getBytecodeString(bytecode) << " ---> " << instructionLength << std::endl;
+                //// std::cout << pcIndex << " - Opcode: 0x" << std::hex << (int)(*pc) << std::dec << " - " << getBytecodeString(bytecode) << " ---> " << instructionLength << std::endl;
 
                 TR::VMAccessCriticalSection vmAccess(comp);
                 // J9VMThread *vm = ((TR_J9VMBase *)comp->fe())->getCurrentVMThread();
@@ -2891,12 +2893,12 @@ public:
                 else
                 {
                     operandStack *succStack = inStacks[succ];
-                    // std::cout << "Succ BCI = " << succBci << std::endl;
+                    //// std::cout << "Succ BCI = " << succBci << std::endl;
 
                     if (succStack->merge(*stack) && worklist_bb_bci.find(succBci) == worklist_bb_bci.end()) // if successor is already in the worklist then don't add it again.
                     {
                         worklist_bb_bci.insert(succBci);
-                        // std::cout << "Reanalysing " << succBci << std::endl;
+                        //// std::cout << "Reanalysing " << succBci << std::endl;
                         worklist.push(succ);
                     }
                 }
@@ -2909,7 +2911,7 @@ public:
         // //    changedMethodNames.erase(fully_qualified_name);
         // // }
         // analysedMethodNames.insert(fully_qualified_name);
-        std::cout << "##############Done traversing the Bytecode of the method " << className << "." << name << signature << "##############" << std::endl;
+        // std::cout << "##############Done traversing the Bytecode of the method " << className << "." << name << signature << "##############" << std::endl;
         // _methodsNamesBeingAnalyzed.erase(className + "." + name + signature);
         std::string fully_qualified_name = className + "." + name + signature;
         analysedMethodNames.insert(fully_qualified_name);
