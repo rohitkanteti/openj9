@@ -389,6 +389,7 @@ target_link_libraries(j9jit
 		j9thr
         # j9shrcommon
 		${CMAKE_DL_LIBS}
+		-lz
 )
 
 # This is a bit hokey, but cmake can't track the fact that files are generated across directories.
