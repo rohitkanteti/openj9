@@ -69,6 +69,7 @@
 #include "../../../../omr/compiler/optimizer/loadingPAG/LoadPAG.cpp"
 #include <cstdio>
 #include <fstream>
+#include <chrono>
 std::unordered_set<J9ROMClass *> modified_ROMClass;
 // extern std::unordered_set<J9ROMClass*>& getModifiedROMClassSet() ;
 extern std::string getMethodName(TR::ResolvedMethodSymbol *m);
@@ -915,8 +916,14 @@ TR_RelocationRecordGroup::applyRelocations(TR_RelocationRuntime *reloRuntime,
          char *changedMethodNamesFile = comp->getOptions()->getchangedMethodNamesFile();
 
          if (changedMethodNamesFile != NULL && reloRuntime->comp()->getOption(TR_RunMyAnalysis) && rc != TR_RelocationErrorCode::inlinedMethodRelocationFailure)
-         {
+         {  
+            auto start = std::chrono::high_resolution_clock::now();
             bool reuse = testIfCanBeReUsed(reloRuntime, changedMethodNamesFile);
+            auto end = std::chrono::high_resolution_clock::now();
+            auto elapsed_us = std::chrono::duration_cast<std::chrono::microseconds>(end - start);
+            // log to console
+            std::cout << "Time taken for testIfCanBeReUsed method = " << elapsed_us.count() << " µs\n";
+
 
             if (reuse == CAN_BE_REUSED)
             {
