@@ -234,12 +234,12 @@ bool testIfCanBeReUsed(TR_RelocationRuntime *reloRuntime, char *changedMethodNam
    // Load the PAG
    if (!loaded_pag)
    {
-      std::string nodes = "nodes.txt";
-      std::string edges = "PAGEdges.txt";
-      std::string methods = "methodIndex_to_PAGNodes.txt";
-      std::string callgraph = "callgraph.txt";
-      std::string threadAccess = "threadAccesible.txt";
-      std::string staticFields = "staticFields.txt";
+      std::string nodes = "nodes.txt.gz";
+      std::string edges = "PAGEdges.txt.gz";
+      std::string methods = "methodIndex_to_PAGNodes.txt.gz";
+      std::string callgraph = "callgraph.txt.gz";
+      std::string threadAccess = "threadAccesible.txt.gz";
+      std::string staticFields = "staticFields.txt.gz";
 
       LoadPAG loader(nodes, edges, methods, callgraph, threadAccess, staticFields);
 
@@ -901,7 +901,8 @@ TR_RelocationRecordGroup::applyRelocations(TR_RelocationRuntime *reloRuntime,
             auto elapsed_us = std::chrono::duration_cast<std::chrono::microseconds>(end - start);
 
             // log to console
-            std::cout << "Time taken for testIfCanBeReUsed method = " << elapsed_us.count() << " µs\n";
+            // std::cout << "Time taken for testIfCanBeReUsed method = " << elapsed_us.count() << " µs\n";
+             RELO_LOG(reloRuntime->reloLogger(), 6, "\tINTERNAL ERROR!\n");
 
             if (reuse == CAN_BE_REUSED)
             {
