@@ -104,19 +104,21 @@ J9Method *findMethodByString(TR_RelocationRuntime *reloRuntime, TR::Compilation 
 
    std::string fullString(rawString);
    size_t openParen = fullString.find('(');
-    if (openParen == std::string::npos) return NULL;
+   if (openParen == std::string::npos)
+      return NULL;
 
    std::string signatureOfChangedMethod = fullString.substr(openParen); // "(Ljava/lang/Object;)Z"
-    std::string classAndMethod = fullString.substr(0, openParen); // "java.util.ArrayList.add"
+   std::string classAndMethod = fullString.substr(0, openParen);        // "java.util.ArrayList.add"
 
-    // Find the last dot in the classAndMethod part
-    size_t lastDot = classAndMethod.find_last_of('.');
-    if (lastDot == std::string::npos) return NULL; 
+   // Find the last dot in the classAndMethod part
+   size_t lastDot = classAndMethod.find_last_of('.');
+   if (lastDot == std::string::npos)
+      return NULL;
 
-    std::string classNameOfChangedMethod = classAndMethod.substr(0, lastDot); // "java.util.ArrayList"
-    std::string methodNameOfChangedMethod = classAndMethod.substr(lastDot + 1); // "add"
+   std::string classNameOfChangedMethod = classAndMethod.substr(0, lastDot);   // "java.util.ArrayList"
+   std::string methodNameOfChangedMethod = classAndMethod.substr(lastDot + 1); // "add"
 
-    // J9 VM expects "com/foo/Bar", not "com.foo.Bar"
+   // J9 VM expects "com/foo/Bar", not "com.foo.Bar"
    std::replace(classNameOfChangedMethod.begin(), classNameOfChangedMethod.end(), '.', '/');
 
    auto fe = comp->fej9();
@@ -149,7 +151,7 @@ J9Method *findMethodByString(TR_RelocationRuntime *reloRuntime, TR::Compilation 
       std::string target_method_name(method_Name, methodNameLength);
       if (methodNameOfChangedMethod == target_method_name && signatureOfChangedMethod == signature_name)
       {
-        return ramMethod;
+         return ramMethod;
       }
    }
 
@@ -158,17 +160,16 @@ J9Method *findMethodByString(TR_RelocationRuntime *reloRuntime, TR::Compilation 
 static std::unordered_set<std::string> modified_method_names;
 static std::vector<J9Method *> modified_methods;
 static PointerAssignmentGraph *loaded_pag = nullptr;
-static std::unordered_map<std::string,bool> result_cache;
+static std::unordered_map<std::string, bool> result_cache;
 bool testIfCanBeReUsed(TR_RelocationRuntime *reloRuntime, char *changedMethodNamesFile)
-{  
+{
    std::string filename_str(changedMethodNamesFile);
 
-    std::ifstream file(filename_str);
+   std::ifstream file(filename_str);
 
-    if (!file.good())
-         return CAN_BE_REUSED; // no method was modified.
+   if (!file.good())
+      return CAN_BE_REUSED; // no method was modified.
 
-   
    // FILE* f = std::fopen("modified_ROMClass.txt", "r");
 
    //  char line[512];
@@ -182,20 +183,21 @@ bool testIfCanBeReUsed(TR_RelocationRuntime *reloRuntime, char *changedMethodNam
 
    //  std::fclose(f);
 
-   if(modified_method_names.size()==0)
+   if (modified_method_names.size() == 0)
    {
-      FILE* f = std::fopen(changedMethodNamesFile, "r");
-      TR_ASSERT_FATAL(f,"Could not open the changed method names file");
+      FILE *f = std::fopen(changedMethodNamesFile, "r");
+      TR_ASSERT_FATAL(f, "Could not open the changed method names file");
 
       char line[512];
-      while (std::fgets(line, sizeof(line), f)) {
+      while (std::fgets(line, sizeof(line), f))
+      {
          std::string line_str(line);
 
-      
          line_str.erase(std::remove(line_str.begin(), line_str.end(), '\n'), line_str.end());
          line_str.erase(std::remove(line_str.begin(), line_str.end(), '\r'), line_str.end());
 
-         if (!line_str.empty()) {
+         if (!line_str.empty())
+         {
             modified_method_names.insert(line_str);
          }
       }
@@ -208,19 +210,18 @@ bool testIfCanBeReUsed(TR_RelocationRuntime *reloRuntime, char *changedMethodNam
 
    // modified_methods.push_back(modifiedJ9Method);
 
-   if(modified_methods.size()==0)
+   if (modified_methods.size() == 0)
    {
-      for(std::string changedMethodName : modified_method_names)
-      {  
+      for (std::string changedMethodName : modified_method_names)
+      {
          // std::cout << "Changed : " << changedMethodName << std::endl;
-         J9Method* modifiedJ9Method = findMethodByString(reloRuntime,reloRuntime->comp(),changedMethodName.c_str());
+         J9Method *modifiedJ9Method = findMethodByString(reloRuntime, reloRuntime->comp(), changedMethodName.c_str());
          // TR_ASSERT_FATAL(modifiedJ9Method,"Could not get the J9Method for the specified method");
-         if(modifiedJ9Method)
+         if (modifiedJ9Method)
             modified_methods.push_back(modifiedJ9Method);
       }
    }
 
-   
    // for (auto *modifiedClass : modified_ROMClass)
    // {
    //    J9UTF8 *className = J9ROMCLASS_CLASSNAME(modifiedClass);
@@ -230,14 +231,14 @@ bool testIfCanBeReUsed(TR_RelocationRuntime *reloRuntime, char *changedMethodNam
    //    modified_methods = getJ9MethodsOfClass(class_name, reloRuntime->comp());
    // }
    // Load the PAG
-   if(!loaded_pag)
+   if (!loaded_pag)
    {
-      std::string nodes = "nodes.txt";
-      std::string edges = "PAGEdges.txt";
-      std::string methods = "methodIndex_to_PAGNodes.txt";
-      std::string callgraph = "callgraph.txt";
-      std::string threadAccess = "threadAccesible.txt";
-      std::string staticFields = "staticFields.txt";
+      std::string nodes = "nodes.txt.gz";
+      std::string edges = "PAGEdges.txt.gz";
+      std::string methods = "methodIndex_to_PAGNodes.txt.gz";
+      std::string callgraph = "callgraph.txt.gz";
+      std::string threadAccess = "threadAccesible.txt.gz";
+      std::string staticFields = "staticFields.txt.gz";
 
       LoadPAG loader(nodes, edges, methods, callgraph, threadAccess, staticFields);
 
@@ -268,14 +269,13 @@ bool testIfCanBeReUsed(TR_RelocationRuntime *reloRuntime, char *changedMethodNam
    std::string mx_methodSignature = classNameStr + "." + name + signature; // reloRuntime->currentResolvedMethod()->findOrCreateJittedMethodSymbol(comp)->signature(comp->trMemory());
    int mx = loaded_pag->_methodIndices[mx_methodSignature];
 
-   if(result_cache.find(mx_methodSignature) != result_cache.end())
+   if (result_cache.find(mx_methodSignature) != result_cache.end())
    {
       return result_cache[mx_methodSignature];
    }
 
    if (modified_methods.size() <= 0)
       return result_cache[mx_methodSignature] = CAN_BE_REUSED;
-
 
    // writeNodesToFile(reloRuntime->comp(),loaded_pag);
 
@@ -332,15 +332,38 @@ bool testIfCanBeReUsed(TR_RelocationRuntime *reloRuntime, char *changedMethodNam
 
          if (analysedMethodNames.empty())
          {
-               std::ifstream file("analyzedMethods.txt");
-               std::string line;
-               int index = 1;
+            // std::ifstream file("analyzedMethods.txt.gz");
+            std::string line;
+            int index = 1;
 
-               while (std::getline(file, line))
+            // while (std::getline(file, line))
+            // {
+            //    analysedMethodNames.insert(line);
+            // }
+            // file.close();
+
+            gzFile file = gzopen("analyzedMethods.txt.gz", "r");
+            if (!file)
+            {
+               TR_ASSERT_FATAL(0,"Could not open analyzedMethods.txt.gz");
+            }
+
+            if (file)
+            {
+               char buffer[4096];
+               while (gzgets(file, buffer, sizeof(buffer)) != NULL)
                {
-                  analysedMethodNames.insert(line);
+                  std::string line(buffer);
+                  line.erase(std::remove(line.begin(), line.end(), '\n'), line.end());
+                  line.erase(std::remove(line.begin(), line.end(), '\r'), line.end());
+
+                  if (!line.empty())
+                  {
+                     analysedMethodNames.insert(line);
+                  }
                }
-               file.close();
+               gzclose(file);
+            }
          }
 
          analysedMethodNames.erase(my_methodSignature);
@@ -355,7 +378,7 @@ bool testIfCanBeReUsed(TR_RelocationRuntime *reloRuntime, char *changedMethodNam
             my = loaded_pag->_methodIndices[my_methodSignature];
 
          block_to_int[method_block] = my;
-         updated_pag = rec_test.update_PAG(updated_pag, my, modifed_method, &(updated_pag->CG),my_methodSignature);
+         updated_pag = rec_test.update_PAG(updated_pag, my, modifed_method, &(updated_pag->CG), my_methodSignature);
          // std::cout << "updated_pag size = " << updated_pag->PAG_nodes.size() << std::endl;
          // std::cout << "loaded_pag size = " << loaded_pag->PAG_nodes.size() << std::endl;
       }
@@ -884,7 +907,6 @@ TR_RelocationRecordGroup::applyRelocations(TR_RelocationRuntime *reloRuntime,
       // in the binary record pointed to by `recordPointer`
       TR_RelocationRecord *reloRecord = TR_RelocationRecord::create(&storage, reloRuntime, reloTarget, recordPointer);
       TR_RelocationErrorCode rc = handleRelocation(reloRuntime, reloTarget, reloRecord, reloOrigin);
-      
 
       if (rc != TR_RelocationErrorCode::relocationOK)
       {
