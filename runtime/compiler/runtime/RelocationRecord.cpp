@@ -901,7 +901,7 @@ TR_RelocationRecordGroup::applyRelocations(TR_RelocationRuntime *reloRuntime,
             auto elapsed_us = std::chrono::duration_cast<std::chrono::microseconds>(end - start);
 
             // log to console
-            // std::cout << "Time taken for testIfCanBeReUsed method = " << elapsed_us.count() << " µs\n";
+            std::cout << elapsed_us.count() << " ";
              RELO_LOG(reloRuntime->reloLogger(), 6, "\tINTERNAL ERROR!\n");
 
             if (reuse == CAN_BE_REUSED)
