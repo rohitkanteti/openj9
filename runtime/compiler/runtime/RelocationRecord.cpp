@@ -69,17 +69,40 @@
 #include "../../../../omr/compiler/optimizer/loadingPAG/LoadPAG.cpp"
 #include <cstdio>
 #include <fstream>
+#include <mutex>
 #include <chrono>
+#include <sys/stat.h>
+#include <stdio.h>
+#include <string>
+#include <algorithm> // For std::replace
+#include "j9.h"
+#include "rommeth.h"
+#include <string>
+#include <sstream>
+#include <iostream>
+//------------------------
+#include <thread>
+#include <mutex>
+#include <condition_variable>
+#include <atomic>
+#include <chrono>
+#include <iostream>
+//------------------------
 std::unordered_set<J9ROMClass *> modified_ROMClass;
 // extern std::unordered_set<J9ROMClass*>& getModifiedROMClassSet() ;
 extern std::string getMethodName(TR::ResolvedMethodSymbol *m);
 #define CAN_BE_REUSED true
 #define NEED_TO_RECOMPILE false
+#define D_PREFIX "[DEBUG-RELO] "
 
 std::vector<J9Method *> getJ9MethodsOfClass(const std::string &class_name, TR::Compilation *comp);
 extern void writeNodesToFile(TR::Compilation *comp, PointerAssignmentGraph *pag);
 extern J9Class *findClassAcrossAllLoaders(TR::Compilation *comp, const std::string &className, TR_J9VMBase *fej9, TR_ResolvedMethod *resolvedMethod);
 static bool PAGupdated = false;
+extern void updateMatchEdges(PointerAssignmentGraph *pag);
+extern void printExhaustive();
+static std::mutex pag_relocation_mutex;
+// static std::atomic<bool> PAGupdated{false};
 static PointerAssignmentGraph *updated_pag;
 extern std::unordered_set<std::string> changedMethodNames;
 enum recompile_test_answers
@@ -88,15 +111,78 @@ enum recompile_test_answers
    RECOMPILE,
    REUSE
 };
-
+bool smartAOTLoad = false;
 static unordered_map<int, unordered_set<PAGEdge *>> methodIndex_to_old_allocs;
 static unordered_map<int, unordered_set<PAGNode *>> methodIndex_to_old_escapes;
 static bool old_allocs_gathered = false;
 static std::unordered_map<int, recompile_test_answers> methodIndex_to_CanItBeResused;
-#include <string>
-#include <algorithm> // For std::replace
-#include "j9.h"
-#include "rommeth.h"
+static std::unordered_set<std::string> modified_method_names;
+static std::vector<J9Method *> modified_methods;
+static PointerAssignmentGraph *loaded_pag = nullptr;
+static std::unordered_map<std::string, bool> result_cache;
+static bool file_checked = false;
+static std::unordered_map<std::string, long> verified_method_timestamps;
+
+// ---
+std::atomic<bool> pag_loading_started{false};
+std::atomic<bool> pag_loading_finished{false};
+std::mutex pag_wait_mutex;
+std::condition_variable pag_wait_cv;
+PointerAssignmentGraph* global_loaded_pag = nullptr;
+
+void backgroundPAGLoaderTask() {
+    auto start = std::chrono::high_resolution_clock::now();
+
+    std::string nodes = "nodes.txt.gz";
+    std::string edges = "PAGEdges.txt.gz";
+    std::string methods = "methodIndex_to_PAGNodes.txt.gz";
+    std::string callgraph = "callgraph.txt.gz";
+    std::string threadAccess = "threadAccesible.txt.gz";
+    std::string staticFields = "staticFields.txt.gz";
+
+    LoadPAG loader(nodes, edges, methods, callgraph, threadAccess, staticFields);
+    PointerAssignmentGraph* temp_pag = loader.getPAG();
+    auto end = std::chrono::high_resolution_clock::now();
+   std::cout << D_PREFIX << " PAG loaded in background took " << std::chrono::duration_cast<std::chrono::microseconds>(end - start).count() << " microseconds\n";
+
+    std::unordered_set<std::string> temp_analyzedMethods;
+    gzFile file = gzopen("analyzedMethods.txt.gz", "rb");
+    if (file == nullptr) {
+        std::cerr << D_PREFIX << " Warning: Could not open analyzedMethods.txt.gz\n";
+    } else {
+        char buffer[4096];
+        while (gzgets(file, buffer, sizeof(buffer)) != nullptr) {
+            std::string line(buffer);
+            line.erase(std::remove(line.begin(), line.end(), '\n'), line.end());
+            line.erase(std::remove(line.begin(), line.end(), '\r'), line.end());
+            if (!line.empty()) {
+                temp_analyzedMethods.insert(line);
+            }
+        }
+        gzclose(file);
+    }
+
+    {
+        std::lock_guard<std::mutex> lock(pag_wait_mutex);
+        global_loaded_pag = temp_pag;
+        
+        analysedMethodNames.insert(temp_analyzedMethods.begin(), temp_analyzedMethods.end());
+        
+        pag_loading_finished = true;
+    }
+
+    pag_wait_cv.notify_all();
+    
+    
+}
+
+void startPAGLoaderThread() {
+    bool expected = false;
+    if (pag_loading_started.compare_exchange_strong(expected, true)) {
+        std::thread loaderThread(backgroundPAGLoaderTask);
+        loaderThread.detach(); 
+    }
+}
 
 J9Method *findMethodByString(TR_RelocationRuntime *reloRuntime, TR::Compilation *comp, const char *rawString)
 {
@@ -111,7 +197,6 @@ J9Method *findMethodByString(TR_RelocationRuntime *reloRuntime, TR::Compilation 
    std::string signatureOfChangedMethod = fullString.substr(openParen); // "(Ljava/lang/Object;)Z"
    std::string classAndMethod = fullString.substr(0, openParen);        // "java.util.ArrayList.add"
 
-   // Find the last dot in the classAndMethod part
    size_t lastDot = classAndMethod.find_last_of('.');
    if (lastDot == std::string::npos)
       return NULL;
@@ -125,7 +210,7 @@ J9Method *findMethodByString(TR_RelocationRuntime *reloRuntime, TR::Compilation 
    auto fe = comp->fej9();
    TR::VMAccessCriticalSection getClassFromCP(reloRuntime->fej9());
    J9JavaVM *vm = reloRuntime->javaVM();
-   J9Class *targetClass = findClassAcrossAllLoaders(comp, classNameOfChangedMethod, (TR_J9VMBase *)fe, NULL);
+   J9Class *targetClass = findClassAcrossAllLoaders(comp, classNameOfChangedMethod, (TR_J9VMBase *)fe, reloRuntime->currentResolvedMethod()); // This will return null if the class is not found
 
    if (!targetClass)
       return NULL;
@@ -141,8 +226,6 @@ J9Method *findMethodByString(TR_RelocationRuntime *reloRuntime, TR::Compilation 
       TR_OpaqueMethodBlock *method_block = reinterpret_cast<TR_OpaqueMethodBlock *>(ramMethod);
       TR_ResolvedMethod *resolved_Method = comp->fe()->createResolvedMethod(comp->trMemory(), method_block, 0);
 
-      // int classNameLength = resolvedMethod->classNameLength();
-      // const char* className = resolvedMethod->classNameChars();
       int methodNameLength = resolved_Method->nameLength();
       const char *method_Name = resolved_Method->nameChars();
       int signatureLength = resolved_Method->signatureLength();
@@ -158,133 +241,335 @@ J9Method *findMethodByString(TR_RelocationRuntime *reloRuntime, TR::Compilation 
 
    return NULL;
 }
-static std::unordered_set<std::string> modified_method_names;
-static std::vector<J9Method *> modified_methods;
-static PointerAssignmentGraph *loaded_pag = nullptr;
-static std::unordered_map<std::string, bool> result_cache;
-bool testIfCanBeReUsed(TR_RelocationRuntime *reloRuntime, char *changedMethodNamesFile)
+
+// Helper to get VM System Property using your preferred style
+const char *getVMProperty(J9JavaVM *vm, const char *propName)
 {
-   std::string filename_str(changedMethodNamesFile);
-
-   std::ifstream file(filename_str);
-
-   if (!file.good())
-      return CAN_BE_REUSED; // no method was modified.
-
-   // FILE* f = std::fopen("modified_ROMClass.txt", "r");
-
-   //  char line[512];
-   //  while (std::fgets(line, sizeof(line), f)) {
-   //      // Parse pointer from hex string
-   //      void* addr = nullptr;
-   //      if (std::sscanf(line, "%p", &addr) == 1 && addr != nullptr) {
-   //          modified_ROMClass.insert(reinterpret_cast<J9ROMClass*>(addr));
-   //      }
-   //  }
-
-   //  std::fclose(f);
-
-   if (modified_method_names.size() == 0)
+   J9VMSystemProperty *jvmInfoProperty = NULL;
+   const char *value = "";
+   UDATA getPropertyResult = vm->internalVMFunctions->getSystemProperty(vm, propName, &jvmInfoProperty);
+   if (J9SYSPROP_ERROR_NONE == getPropertyResult && jvmInfoProperty)
    {
-      FILE *f = std::fopen(changedMethodNamesFile, "r");
-      TR_ASSERT_FATAL(f, "Could not open the changed method names file");
+      value = (const char *)jvmInfoProperty->value;
+   }
+   return value;
+}
 
-      char line[512];
-      while (std::fgets(line, sizeof(line), f))
+long getApplicationJarTimestamp(TR::Compilation *comp)
+{
+
+   TR_J9VMBase *fej9 = (TR_J9VMBase *)comp->fe();
+   J9VMThread *vmThread = fej9->getCurrentVMThread();
+   J9JavaVM *vm = vmThread->javaVM;
+
+   // Retrieve the full classpath string
+   const char *cpValue = getVMProperty(vm, "java.class.path");
+
+   if (!cpValue || strlen(cpValue) == 0)
+   {
+      std::cout << "  [DEBUG] java.class.path is empty or null." << std::endl;
+      return -1;
+   }
+   // Handle multiple JARs in the classpath (split by : or ;)
+   std::stringstream ss(cpValue);
+   std::string entry;
+   char delimiter = ':';
+#ifdef WIN32
+   delimiter = ';';
+#endif
+
+   while (std::getline(ss, entry, delimiter))
+   {
+      if (entry.empty())
+         continue;
+
+      struct stat fileStat;
+      if (stat(entry.c_str(), &fileStat) == 0)
       {
-         std::string line_str(line);
-
-         line_str.erase(std::remove(line_str.begin(), line_str.end(), '\n'), line_str.end());
-         line_str.erase(std::remove(line_str.begin(), line_str.end(), '\r'), line_str.end());
-
-         if (!line_str.empty())
+         // Check if it's a regular file or directory
+         if (S_ISREG(fileStat.st_mode) || S_ISDIR(fileStat.st_mode))
          {
-            modified_method_names.insert(line_str);
+
+            return (long)fileStat.st_mtime;
          }
       }
-
-      std::fclose(f);
-   }
-
-   // J9Method* modifiedJ9Method = findMethodByString(reloRuntime,reloRuntime->comp(),changedMethodName);
-   // TR_ASSERT_FATAL(modifiedJ9Method,"Could not get the J9Method for the specified method");
-
-   // modified_methods.push_back(modifiedJ9Method);
-
-   if (modified_methods.size() == 0)
-   {
-      for (std::string changedMethodName : modified_method_names)
+      else
       {
-         // std::cout << "Changed : " << changedMethodName << std::endl;
-         J9Method *modifiedJ9Method = findMethodByString(reloRuntime, reloRuntime->comp(), changedMethodName.c_str());
-         // TR_ASSERT_FATAL(modifiedJ9Method,"Could not get the J9Method for the specified method");
-         if (modifiedJ9Method)
-            modified_methods.push_back(modifiedJ9Method);
+         std::cout << "  [DEBUG] stat() failed for entry: " << entry << std::endl;
       }
    }
 
-   // for (auto *modifiedClass : modified_ROMClass)
-   // {
-   //    J9UTF8 *className = J9ROMCLASS_CLASSNAME(modifiedClass);
-   //    const char *classNameData = (const char *)J9UTF8_DATA(className);
-   //    uint16_t classNameLength = J9UTF8_LENGTH(className);
-   //    std::string class_name(classNameData, classNameLength);
-   //    modified_methods = getJ9MethodsOfClass(class_name, reloRuntime->comp());
-   // }
-   // Load the PAG
-   if (!loaded_pag)
+   return -1;
+}
+
+/**
+ * Main Logic: Extracts the file modification timestamp for the given J9Class,
+ * with a fallback to the main application jar for dynamically loaded classes.
+ */
+long getClassFileTimestamp(J9Class *clazz, TR::Compilation *comp)
+{
+   if (!clazz || !clazz->classLoader)
    {
-      std::string nodes = "nodes.txt.gz";
-      std::string edges = "PAGEdges.txt.gz";
-      std::string methods = "methodIndex_to_PAGNodes.txt.gz";
-      std::string callgraph = "callgraph.txt.gz";
-      std::string threadAccess = "threadAccesible.txt.gz";
-      std::string staticFields = "staticFields.txt.gz";
-
-      LoadPAG loader(nodes, edges, methods, callgraph, threadAccess, staticFields);
-
-      loaded_pag = loader.getPAG();
+      std::cout << "[DEBUG] clazz or clazz->classLoader is null. Returning -8." << std::endl;
+      return -8;
    }
 
-   recompilation_test rec_test;
-   rec_test.reloRuntime = reloRuntime;
-   TR::Compilation *comp = reloRuntime->comp();
+   // 1. Safely extract class name for debugging context
+   J9ROMClass *romClass = clazz->romClass;
+   std::string className = "<unknown>";
+   if (romClass)
+   {
+      U_32 nameLen = J9UTF8_LENGTH(J9ROMCLASS_CLASSNAME(romClass));
+      const char *nameData = (const char *)J9UTF8_DATA(J9ROMCLASS_CLASSNAME(romClass));
+      className = std::string(nameData, nameLen);
+   }
+
+   J9ClassLoader *classLoader = clazz->classLoader;
+
+   // PATH A: Standard classes loaded from standard files
+   if (classLoader->classPathEntryCount > 0)
+   {
+      J9ClassPathEntry *cpEntry = classLoader->classPathEntries[0];
+      if (cpEntry && cpEntry->path)
+      {
+         const char *filePath = (const char *)cpEntry->path;
+
+         struct stat fileStat;
+         if (stat(filePath, &fileStat) == 0)
+         {
+            return (long)fileStat.st_mtime;
+         }
+         else
+         {
+            std::cout << "[DEBUG] stat() FAILED for path: " << filePath << std::endl;
+         }
+      }
+      else
+      {
+         std::cout << "[DEBUG] cpEntry or path is null." << std::endl;
+      }
+   }
+   // PATH B: Custom ClassLoaders (DaCapo) or JDK Modules (count is 0)
+   else
+   {
+
+      long appJarTimestamp = getApplicationJarTimestamp(comp);
+
+      if (appJarTimestamp != -1)
+      {
+         return appJarTimestamp;
+      }
+      else
+      {
+         std::cout << "[DEBUG] Fallback FAILED. Could not get AppJar Timestamp." << std::endl;
+      }
+   }
+   std::cout << "[DEBUG]  FAILED. Could not get Timestamp so returning -1." << std::endl;
+   return -1;
+}
+
+bool testIfCanBeReUsed(TR_RelocationRuntime *reloRuntime, char *changedMethodNamesFile)
+{
 
    TR_ResolvedMethod *resolvedMethod = reloRuntime->currentResolvedMethod();
    char *methodName = resolvedMethod->nameChars();
    int32_t methodNameLength = resolvedMethod->nameLength();
    char *methodSignature = resolvedMethod->signatureChars();
    int32_t methodSignatureLength = resolvedMethod->signatureLength();
-   std::string name(methodName, methodNameLength);
-   std::string signature(methodSignature, methodSignatureLength);
-
+   TR::Compilation *comp = reloRuntime->comp();
    TR_OpaqueClassBlock *clazz = resolvedMethod->classOfMethod();
    J9Class *j9clazz = (J9Class *)clazz;
+   // long timestamp = getClassFileTimestamp(j9clazz, comp);
 
    J9UTF8 *classNameUTF8 = J9ROMCLASS_CLASSNAME(j9clazz->romClass);
    char *className = (char *)J9UTF8_DATA(classNameUTF8);
    int32_t classNameLength = J9UTF8_LENGTH(classNameUTF8);
 
-   std::string classNameStr(className, classNameLength);
+   std::string mx_methodSignature;
+   mx_methodSignature.reserve(classNameLength + 1 + methodNameLength + methodSignatureLength);
+   mx_methodSignature.append(className, classNameLength);
+   mx_methodSignature.append(".");
+   mx_methodSignature.append(methodName, methodNameLength);
+   mx_methodSignature.append(methodSignature, methodSignatureLength);
 
-   std::string mx_methodSignature = classNameStr + "." + name + signature; // reloRuntime->currentResolvedMethod()->findOrCreateJittedMethodSymbol(comp)->signature(comp->trMemory());
-   int mx = loaded_pag->_methodIndices[mx_methodSignature];
+   recompilation_test rec_test;
+   rec_test.reloRuntime = reloRuntime;
 
-   if (result_cache.find(mx_methodSignature) != result_cache.end())
+   // std::lock_guard automatically locks here, and unlocks when the function returns
+   std::lock_guard<std::mutex> lock(pag_relocation_mutex);
+
+   auto cache_it = result_cache.find(mx_methodSignature);
+   if (cache_it != result_cache.end())
    {
-      return result_cache[mx_methodSignature];
+      return cache_it->second;
    }
 
-   if (modified_methods.size() <= 0)
-      return result_cache[mx_methodSignature] = CAN_BE_REUSED;
-
-   // writeNodesToFile(reloRuntime->comp(),loaded_pag);
-
-   // if(methodIndex_to_CanItBeResused.find(mx) != methodIndex_to_CanItBeResused.end())
+   // if (verified_method_timestamps.find(mx_methodSignature) != verified_method_timestamps.end() && verified_method_timestamps[mx_methodSignature] == timestamp)
    // {
-   //    if(methodIndex_to_CanItBeResused[mx] == REUSE) return CAN_BE_REUSED;
-   //    return NEED_TO_RECOMPILE;
+   //    result_cache[mx_methodSignature] = CAN_BE_REUSED;
+   //    return CAN_BE_REUSED;
    // }
+
+   static bool file_checked = false;
+   static bool methods_modified = false;
+
+   if (!file_checked)
+   {
+      // auto start = std::chrono::high_resolution_clock::now();
+      file_checked = true;
+      std::ifstream file(changedMethodNamesFile);
+
+      if (file.good())
+      {
+         methods_modified = true;
+         file.close();
+
+         FILE *f = std::fopen(changedMethodNamesFile, "r");
+         if (f)
+         {
+            char line[512];
+            while (std::fgets(line, sizeof(line), f))
+            {
+               std::string line_str(line);
+               line_str.erase(std::remove(line_str.begin(), line_str.end(), '\n'), line_str.end());
+               line_str.erase(std::remove(line_str.begin(), line_str.end(), '\r'), line_str.end());
+
+               if (!line_str.empty())
+               {
+                  modified_method_names.insert(line_str);
+               }
+            }
+            std::fclose(f);
+         }
+      }
+
+      // std::ifstream ts_file("validated_methods.txt");
+      // if (ts_file.is_open())
+      // {
+      //    std::string line;
+      //    while (std::getline(ts_file, line))
+      //    {
+      //       if (line.empty())
+      //          continue;
+
+      //       size_t commaPos = line.find_last_of(',');
+
+      //       if (commaPos != std::string::npos)
+      //       {
+      //          std::string signature = line.substr(0, commaPos);
+      //          std::string timestampStr = line.substr(commaPos + 1);
+
+      //          try
+      //          {
+      //             long timestamp = std::stol(timestampStr);
+
+      //             verified_method_timestamps[signature] = timestamp;
+      //          }
+      //          catch (const std::exception &e)
+      //          {
+      //             continue;
+      //          }
+      //       }
+      //    }
+
+      //    file.close();
+      // }
+      // auto end = std::chrono::high_resolution_clock::now();
+      // auto elapsed_us = std::chrono::duration_cast<std::chrono::microseconds>(end - start);
+      // std::cout << "Time for getting modified methods in testifcanberesused: " << elapsed_us.count() << " microsecs\n";
+      // std::cout.flush();
+   }
+
+   if (!methods_modified || modified_method_names.empty())
+   {
+      return CAN_BE_REUSED;
+   }
+
+   // if (modified_methods.empty())
+   // {
+   //    auto start = std::chrono::high_resolution_clock::now();
+   //    for (const std::string &changedMethodName : modified_method_names)
+   //    {
+   //       J9Method *modifiedJ9Method = findMethodByString(reloRuntime, comp, changedMethodName.c_str());
+   //       if (modifiedJ9Method)
+   //          modified_methods.push_back(modifiedJ9Method);
+   //       else
+   //       {
+   //          std::cout << "Could not find modified method for signature: " << changedMethodName << "\n";
+   //       }
+   //    }
+   //    auto end = std::chrono::high_resolution_clock::now();
+   //    auto elapsed_us = std::chrono::duration_cast<std::chrono::microseconds>(end - start);
+   //    std::cout <<"Time for finding all modified J9Methods(findMethodByString) in testifcanberesused: "<< elapsed_us.count() << "  microsecs\n";std::cout.flush();
+
+   // }
+   if (!loaded_pag)
+   {
+      // Fallback: If the JVM startup hook failed to start the thread for some reason, start it now.
+      if (!pag_loading_started) {
+          startPAGLoaderThread();
+          std::cout << D_PREFIX << "Started PAG loader thread from testIfCanBeReUsed as fallback." << std::endl;
+      }
+
+      // Wait for the background thread to finish
+      std::unique_lock<std::mutex> wait_lock(pag_wait_mutex);
+      pag_wait_cv.wait(wait_lock, []{ return pag_loading_finished.load(); });
+      
+      loaded_pag = global_loaded_pag;
+      TR_ASSERT_FATAL(loaded_pag, "PAG should has not been loaded by the background thread !!");
+   }
+
+   // if (!loaded_pag)
+   // {
+   //    auto start = std::chrono::high_resolution_clock::now();
+
+   //    std::string nodes = "nodes.txt.gz";
+   //    std::string edges = "PAGEdges.txt.gz";
+   //    std::string methods = "methodIndex_to_PAGNodes.txt.gz";
+   //    std::string callgraph = "callgraph.txt.gz";
+   //    std::string threadAccess = "threadAccesible.txt.gz";
+   //    std::string staticFields = "staticFields.txt.gz";
+
+   //    LoadPAG loader(nodes, edges, methods, callgraph, threadAccess, staticFields);
+   //    loaded_pag = loader.getPAG();
+
+   //    // auto end = std::chrono::high_resolution_clock::now();
+   //    // auto elapsed_us = std::chrono::duration_cast<std::chrono::microseconds>(end - start);
+   //    // std::cout << "Time for loading PAG in testifcanberesused: " << elapsed_us.count() << " microsecs\n";
+   //    // std::cout.flush();
+
+   //    if (analysedMethodNames.empty())
+   //    {
+   //       gzFile file = gzopen("analyzedMethods.txt.gz", "rb");
+
+   //       if (file == nullptr)
+   //       {
+   //          std::cerr << D_PREFIX << " Warning: Could not open analyzedMethods.txt.gz\n";
+   //       }
+   //       else
+   //       {
+   //          char buffer[4096];
+
+   //          while (gzgets(file, buffer, sizeof(buffer)) != nullptr)
+   //          {
+   //             std::string line(buffer);
+
+   //             line.erase(std::remove(line.begin(), line.end(), '\n'), line.end());
+   //             line.erase(std::remove(line.begin(), line.end(), '\r'), line.end());
+
+   //             if (!line.empty())
+   //             {
+   //                analysedMethodNames.insert(line);
+   //             }
+   //          }
+
+   //          gzclose(file);
+   //       }
+   //    }
+   // }
+
+   int mx = loaded_pag->_methodIndices[mx_methodSignature];
+
    if (!old_allocs_gathered)
    {
       old_allocs_gathered = true;
@@ -295,86 +580,205 @@ bool testIfCanBeReUsed(TR_RelocationRuntime *reloRuntime, char *changedMethodNam
       }
    }
 
-   unordered_set<PAGEdge *> allocs = methodIndex_to_old_allocs[mx];
-   unordered_set<PAGNode *> escapes = methodIndex_to_old_escapes[mx];
-   // update the PAG
+   const unordered_set<PAGEdge *> &allocs = methodIndex_to_old_allocs[mx];
+   const unordered_set<PAGNode *> &escapes = methodIndex_to_old_escapes[mx];
+
    if (!PAGupdated)
    {
+      // auto start = std::chrono::high_resolution_clock::now();
 
       PAGupdated = true;
-      updated_pag = loaded_pag; // this is pointer no deep copy is made !!
-      unordered_map<TR_OpaqueMethodBlock *, int> block_to_int;
-      for (auto *modifed_method : modified_methods)
+      updated_pag = loaded_pag; // This is a pointer copy
+
+      // //    writeNodesToFile(comp, updated_pag);
+      // //    // printExhaustive();
+      // //    std::map<int, std::string> methodMap;
+      // //    int i = 0;
+
+      // //    gzFile miFile = gzopen("mi.txt.gz", "w");
+      // //    if (miFile)
+      // //    {
+
+      // //       map<int, std::string> inverseMethodIndices;
+      // //       for (auto m : updated_pag->_methodIndices)
+      // //       {
+      // //          inverseMethodIndices[m.second] = m.first;
+      // //       }
+      // //       for (auto m : inverseMethodIndices)
+      // //       {
+      // //          gzprintf(miFile, "%s\n", m.second.c_str());
+      // //          i++;
+      // //       }
+
+      // //       gzclose(miFile);
+      // //    }
+      // }
+
+      TR::Compilation *comp = reloRuntime->comp();
+      TR_J9VMBase *fej9 = (TR_J9VMBase *)comp->fe();
+      TR_ResolvedMethod *contextMethod = reloRuntime->currentResolvedMethod();
+      // TR_OpaqueClassBlock *agentClassBlock = fej9->getClassFromSignature("Lorg/sunflow/ForNameAgent;", 26, contextMethod, false);
+      J9Class *agentJ9Class = findClassAcrossAllLoaders(comp, "ForNameAgent", fej9, contextMethod);
+
+      TR_ASSERT_FATAL(agentJ9Class, "Could not find ForNameAgent class block!");
+      J9ClassLoader *agentLoader = agentJ9Class->classLoader;
+
+      J9Method *anyAgentMethod = &(agentJ9Class->ramMethods[0]); // The first method in the class
+
+      TR_ResolvedMethod *agentContext = fej9->createResolvedMethod(
+          comp->trMemory(),
+          (TR_OpaqueMethodBlock *)anyAgentMethod,
+          NULL);
+
+      TR_ASSERT_FATAL(agentContext, "Could not create resolved method for ForNameAgent!");
+
+      for (const std::string &changedMethodName : modified_method_names)
       {
-         TR_OpaqueMethodBlock *method_block = reinterpret_cast<TR_OpaqueMethodBlock *>(modifed_method);
-         resolvedMethod = comp->fe()->createResolvedMethod(
-             comp->trMemory(),
-             method_block,
-             comp->getCurrentMethod());
-         methodName = resolvedMethod->nameChars();
-         methodNameLength = resolvedMethod->nameLength();
-         methodSignature = resolvedMethod->signatureChars();
-         methodSignatureLength = resolvedMethod->signatureLength();
+         J9Method *modifed_method = nullptr;
 
-         std::string Mname(methodName, methodNameLength);
-         std::string Msignature(methodSignature, methodSignatureLength);
+         size_t dotPos = changedMethodName.find_first_of('.');
+         size_t parenPos = changedMethodName.find_first_of('(');
 
-         clazz = resolvedMethod->classOfMethod();
-         j9clazz = (J9Class *)clazz;
-
-         classNameUTF8 = J9ROMCLASS_CLASSNAME(j9clazz->romClass);
-         char *cName = (char *)J9UTF8_DATA(classNameUTF8);
-         int32_t cNameLength = J9UTF8_LENGTH(classNameUTF8);
-
-         std::string cNameStr(cName, cNameLength);
-
-         std::string my_methodSignature = cNameStr + "." + Mname + Msignature;
-         // std::cout << " my_methodSignature = " << my_methodSignature << std::endl;
-
-         if (analysedMethodNames.empty())
+         if (dotPos != std::string::npos && parenPos != std::string::npos && contextMethod)
          {
-            std::ifstream file("analyzedMethods.txt");
-            std::string line;
-            int index = 1;
+            std::string className = changedMethodName.substr(0, dotPos);
+            std::string methodName = changedMethodName.substr(dotPos + 1, parenPos - dotPos - 1);
+            std::string methodSignature = changedMethodName.substr(parenPos);
 
-            while (std::getline(file, line))
+            // 3. Ask the frontend to find the class
+            TR_OpaqueClassBlock *classBlock = fej9->getClassFromSignature(className.c_str(), className.length(), agentContext, true);
+
+            if (classBlock)
             {
-               analysedMethodNames.insert(line);
+               J9Class *targetClass = (J9Class *)classBlock;
+               J9ROMClass *romClass = targetClass->romClass;
+               // J9ROMMethod *romMethod = J9ROMCLASS_ROMMETHODS(romClass);
+
+               for (U_32 i = 0; i < romClass->romMethodCount; i++)
+               {
+                  J9Method *ramMethod = &targetClass->ramMethods[i];
+                  J9ROMMethod *romMethod = J9_ROM_METHOD_FROM_RAM_METHOD(ramMethod);
+                  J9UTF8 *nameUTF8 = J9ROMMETHOD_NAME(romMethod);
+                  std::string currentName((char *)J9UTF8_DATA(nameUTF8), J9UTF8_LENGTH(nameUTF8));
+
+                  J9UTF8 *sigUTF8 = J9ROMMETHOD_SIGNATURE(romMethod);
+                  std::string currentSig((char *)J9UTF8_DATA(sigUTF8), J9UTF8_LENGTH(sigUTF8));
+
+                  // Optional: Verbose method dumping (uncomment if you can't find a specific match)
+                  // std::cout << D_PREFIX << "    Checking: " << currentName << currentSig << std::endl;
+
+                  if (currentName == methodName && currentSig == methodSignature)
+                  {
+                     modifed_method = targetClass->ramMethods + i;
+                     // std::cout << D_PREFIX << "  MATCH FOUND: J9Method* = " << modifed_method << std::endl;
+                     break;
+                  }
+                  // romMethod = J9ROMMETHOD_NEXT(romMethod);
+               }
             }
-            file.close();
+            else
+            {
+               std::cout << D_PREFIX << "  FAILED: Class [" << className << "] not found via getClassFromSignature (likely not loaded yet)." << std::endl;
+            }
          }
 
-         analysedMethodNames.erase(my_methodSignature);
-
-         int my;
-         if (loaded_pag->_methodIndices.find(my_methodSignature) == loaded_pag->_methodIndices.end()) // This means that this method my was not analyzed before or called before.
+         if (modifed_method)
          {
-            my = loaded_pag->_methodIndices.size() + 1;
-            loaded_pag->_methodIndices[my_methodSignature] = my;
+            modified_methods.push_back(modifed_method);
+
+            TR_OpaqueMethodBlock *method_block = reinterpret_cast<TR_OpaqueMethodBlock *>(modifed_method);
+            TR_ResolvedMethod *mod_resolvedMethod = comp->fe()->createResolvedMethod(
+                comp->trMemory(),
+                method_block,
+                comp->getCurrentMethod());
+
+            // Construct internal signature for indexing
+            char *m_methodName = mod_resolvedMethod->nameChars();
+            int32_t m_methodNameLength = mod_resolvedMethod->nameLength();
+            char *m_methodSignature = mod_resolvedMethod->signatureChars();
+            int32_t m_methodSignatureLength = mod_resolvedMethod->signatureLength();
+
+            TR_OpaqueClassBlock *m_clazz = mod_resolvedMethod->classOfMethod();
+            J9Class *m_j9clazz = (J9Class *)m_clazz;
+            J9UTF8 *m_classNameUTF8 = J9ROMCLASS_CLASSNAME(m_j9clazz->romClass);
+
+            std::string my_methodSignature;
+            my_methodSignature.append((char *)J9UTF8_DATA(m_classNameUTF8), J9UTF8_LENGTH(m_classNameUTF8));
+            my_methodSignature.append(".");
+            my_methodSignature.append(m_methodName, m_methodNameLength);
+            my_methodSignature.append(m_methodSignature, m_methodSignatureLength);
+
+            analysedMethodNames.erase(my_methodSignature);
+
+            int my;
+            if (loaded_pag->_methodIndices.find(my_methodSignature) == loaded_pag->_methodIndices.end())
+            {
+               my = loaded_pag->_methodIndices.size() + 1;
+               loaded_pag->_methodIndices[my_methodSignature] = my;
+            }
+            else
+            {
+               my = loaded_pag->_methodIndices[my_methodSignature];
+            }
+
+            // std::cout << D_PREFIX << "  Updating PAG for " << my_methodSignature << " Index: " << my << std::endl;
+
+            // auto start_update = std::chrono::high_resolution_clock::now();
+            updated_pag = rec_test.update_PAG(updated_pag, my, modifed_method, &(updated_pag->CG), my_methodSignature);
+            // auto end_update = std::chrono::high_resolution_clock::now();
+            // auto elapsed_update = std::chrono::duration_cast<std::chrono::microseconds>(end_update - start_update);
+            // std::cout << D_PREFIX << "  SUCCESS: PAG Update for "  << my_methodSignature << " took " << elapsed_update.count() << " us" << std::endl;
          }
-         else
-            my = loaded_pag->_methodIndices[my_methodSignature];
-
-         block_to_int[method_block] = my;
-         updated_pag = rec_test.update_PAG(updated_pag, my, modifed_method, &(updated_pag->CG), my_methodSignature);
-         // std::cout << "updated_pag size = " << updated_pag->PAG_nodes.size() << std::endl;
-         // std::cout << "loaded_pag size = " << loaded_pag->PAG_nodes.size() << std::endl;
+         // else
+         // {
+         //    std::cout << D_PREFIX << "-----------Could not find modified method for signature: " << changedMethodName << std::endl;
+         // }
+         // std::cout.flush();
       }
-   }
-   // test for each of the modified method
-   // std::cout << "Testing index = " << mx << std::endl;
-   bool recompile = rec_test.should_recompile(mx, updated_pag, allocs, escapes);
 
+      // auto start2 = std::chrono::high_resolution_clock::now();
+
+      updateMatchEdges(updated_pag);
+
+      // auto end2 = std::chrono::high_resolution_clock::now();
+      // auto duration = std::chrono::duration_cast<std::chrono::microseconds>(end2 - start2).count();
+      // std::cout << D_PREFIX << "Time taken to update match edges after update_PAG: " << duration << "  microseconds\n" << std::endl;
+      // std::cout.flush();
+      // auto end = std::chrono::high_resolution_clock::now();
+      // auto elapsed_us = std::chrono::duration_cast<std::chrono::microseconds>(end - start);
+      // std::cout << "Total time for updating PAG in testifcanberesused: " << elapsed_us.count() << " microsecs\n";
+      // std::cout.flush();
+   }
+
+   // auto start = std::chrono::high_resolution_clock::now();
+   bool recompile = rec_test.should_recompile(mx, updated_pag, allocs, escapes);
+   // auto end = std::chrono::high_resolution_clock::now();
+   // auto elapsed_us = std::chrono::duration_cast<std::chrono::microseconds>(end - start);
+   // std::cout << "Time for should_recompile in testifcanberesused: " << elapsed_us.count() << " microsecs\n";
+   // std::cout.flush();
    if (recompile)
    {
-      // std::cout << "Need to recompile: " << reloRuntime->comp()->signature() << std::endl;
       methodIndex_to_CanItBeResused[mx] = RECOMPILE;
-      return result_cache[mx_methodSignature] = NEED_TO_RECOMPILE;
+      result_cache[mx_methodSignature] = NEED_TO_RECOMPILE;
+      return NEED_TO_RECOMPILE; // Mutex unlocks automatically
    }
-   methodIndex_to_CanItBeResused[mx] = REUSE;
-   return result_cache[mx_methodSignature] = CAN_BE_REUSED;
-}
 
+   methodIndex_to_CanItBeResused[mx] = REUSE;
+   result_cache[mx_methodSignature] = CAN_BE_REUSED;
+   // char logBuffer[2048];
+   // int charsWritten = snprintf(logBuffer, sizeof(logBuffer), "%s,%ld\n", mx_methodSignature.c_str(), timestamp);
+   // if (charsWritten > 0 && charsWritten < sizeof(logBuffer))
+   // {
+
+   //    FILE *logFile = fopen("validated_methods.txt", "a");
+   //    if (logFile)
+   //    {
+   //       fputs(logBuffer, logFile);
+   //       fclose(logFile);
+   //    }
+   // }
+   return CAN_BE_REUSED; // Mutex unlocks automatically
+}
 std::vector<J9Method *> getJ9MethodsOfClass(const std::string &class_name, TR::Compilation *comp)
 {
    std::vector<J9Method *> j9Methods;
@@ -876,7 +1280,6 @@ TR_RelocationRecordGroup::applyRelocations(TR_RelocationRuntime *reloRuntime,
 
    TR_RelocationRecordBinaryTemplate *recordPointer = firstRecord(reloRuntime, reloTarget);
    TR_RelocationRecordBinaryTemplate *endOfRecords = pastLastRecord(reloTarget);
-   TR::Compilation *comp = reloRuntime->comp();
 
    while (recordPointer < endOfRecords)
    {
@@ -885,52 +1288,53 @@ TR_RelocationRecordGroup::applyRelocations(TR_RelocationRuntime *reloRuntime,
       // in the binary record pointed to by `recordPointer`
       TR_RelocationRecord *reloRecord = TR_RelocationRecord::create(&storage, reloRuntime, reloTarget, recordPointer);
       TR_RelocationErrorCode rc = handleRelocation(reloRuntime, reloTarget, reloRecord, reloOrigin);
-
       if (rc != TR_RelocationErrorCode::relocationOK)
       {
          uint8_t reloType = recordPointer->type(reloTarget);
          aotStats->numRelocationsFailedByType[reloType]++;
+         TR::Compilation *comp = reloRuntime->comp();
          char *changedMethodNamesFile = comp->getOptions()->getchangedMethodNamesFile();
 
-         if (changedMethodNamesFile != NULL && reloRuntime->comp()->getOption(TR_RunMyAnalysis) && rc != TR_RelocationErrorCode::inlinedMethodRelocationFailure)
+         if (changedMethodNamesFile != NULL && comp->getOption(TR_smartAOTLoad) && rc != TR_RelocationErrorCode::inlinedMethodRelocationFailure && rc != TR_RelocationErrorCode::stringCompressionValidationFailure)
          {
             auto start = std::chrono::high_resolution_clock::now();
+
             bool reuse = testIfCanBeReUsed(reloRuntime, changedMethodNamesFile);
+
             auto end = std::chrono::high_resolution_clock::now();
-
             auto elapsed_us = std::chrono::duration_cast<std::chrono::microseconds>(end - start);
-
-            // log to console
             std::cout << elapsed_us.count() << " ";
-             RELO_LOG(reloRuntime->reloLogger(), 6, "\tINTERNAL ERROR!\n");
+            // std::cout.flush();
+
+            RELO_LOG(reloRuntime->reloLogger(), 6, "\tINTERNAL ERROR!\n");
 
             if (reuse == CAN_BE_REUSED)
             {
-               TR_ResolvedMethod *resolvedMethod = reloRuntime->currentResolvedMethod();
-               char *methodName = resolvedMethod->nameChars();
-               int32_t methodNameLength = resolvedMethod->nameLength();
-               char *methodSignature = resolvedMethod->signatureChars();
-               int32_t methodSignatureLength = resolvedMethod->signatureLength();
-               std::string name(methodName, methodNameLength);
-               std::string signature(methodSignature, methodSignatureLength);
+               // TR_ResolvedMethod *resolvedMethod = reloRuntime->currentResolvedMethod();
+               // char *methodName = resolvedMethod->nameChars();
+               // int32_t methodNameLength = resolvedMethod->nameLength();
+               // char *methodSignature = resolvedMethod->signatureChars();
+               // int32_t methodSignatureLength = resolvedMethod->signatureLength();
+               // std::string name(methodName, methodNameLength);
+               // std::string signature(methodSignature, methodSignatureLength);
 
-               TR_OpaqueClassBlock *clazz = resolvedMethod->classOfMethod();
-               J9Class *j9clazz = (J9Class *)clazz;
+               // TR_OpaqueClassBlock *clazz = resolvedMethod->classOfMethod();
+               // J9Class *j9clazz = (J9Class *)clazz;
 
-               J9UTF8 *classNameUTF8 = J9ROMCLASS_CLASSNAME(j9clazz->romClass);
-               char *className = (char *)J9UTF8_DATA(classNameUTF8);
-               int32_t classNameLength = J9UTF8_LENGTH(classNameUTF8);
+               // J9UTF8 *classNameUTF8 = J9ROMCLASS_CLASSNAME(j9clazz->romClass);
+               // char *className = (char *)J9UTF8_DATA(classNameUTF8);
+               // int32_t classNameLength = J9UTF8_LENGTH(classNameUTF8);
 
-               std::string classNameStr(className, classNameLength);
+               // std::string classNameStr(className, classNameLength);
 
                // std::cout << "1. Need not to recompile and can be reused " << className << "." << name << signature << std::endl; //<< reloRuntime->currentResolvedMethod()->findOrCreateJittedMethodSymbol(comp)->signature(comp->trMemory()) << std::endl;
                // return TR_RelocationErrorCode::relocationOK;
                goto OK;
             }
-            else
-            {
-               // std::cout << "Cannot be reused!!\n";
-            }
+            // else
+            // {
+            //    // std::cout << "Cannot be reused!!\n";
+            // }
          }
 
          return rc;

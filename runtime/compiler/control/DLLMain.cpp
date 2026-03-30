@@ -42,6 +42,7 @@
 #include "j9.h"
 #include "jvminit.h"
 
+
 // NOTE: Any changes made to J9VMDllMain that relate to AOT compile time
 // should be put instead in onLoadInternal().
 //
@@ -55,6 +56,8 @@
 extern bool initializeJIT(J9JavaVM *vm);
 
 extern bool isQuickstart;
+
+extern void startPAGLoaderThread();
 
 static IDATA initializeCompilerArgs(J9JavaVM* vm,
                                     J9VMDllLoadInfo* loadInfo,
@@ -477,7 +480,13 @@ IDATA J9VMDllMain(J9JavaVM* vm, IDATA stage, void * reserved)
                   }
                */
                jitInitialized = true;
-               return J9VMDLLMAIN_OK;
+               if (TR::Options::getAOTCmdLineOptions()->getOption(TR_smartAOTLoad))
+               {
+                  startPAGLoaderThread();
+               }
+                  
+               
+                  return J9VMDLLMAIN_OK;
                }
             catch (const std::exception &e) {}
             _abort:
