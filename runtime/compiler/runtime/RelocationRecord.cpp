@@ -131,7 +131,7 @@ std::condition_variable pag_wait_cv;
 PointerAssignmentGraph* global_loaded_pag = nullptr;
 
 void backgroundPAGLoaderTask() {
-    auto start = std::chrono::high_resolution_clock::now();
+   //  auto start = std::chrono::high_resolution_clock::now();
 
     std::string nodes = "nodes.txt.gz";
     std::string edges = "PAGEdges.txt.gz";
@@ -142,8 +142,8 @@ void backgroundPAGLoaderTask() {
 
     LoadPAG loader(nodes, edges, methods, callgraph, threadAccess, staticFields);
     PointerAssignmentGraph* temp_pag = loader.getPAG();
-    auto end = std::chrono::high_resolution_clock::now();
-   std::cout << D_PREFIX << " PAG loaded in background took " << std::chrono::duration_cast<std::chrono::microseconds>(end - start).count() << " microseconds\n";
+   //  auto end = std::chrono::high_resolution_clock::now();
+   // std::cout << D_PREFIX << " PAG loaded in background took " << std::chrono::duration_cast<std::chrono::microseconds>(end - start).count() << " microseconds\n";
 
     std::unordered_set<std::string> temp_analyzedMethods;
     gzFile file = gzopen("analyzedMethods.txt.gz", "rb");
@@ -647,7 +647,7 @@ bool testIfCanBeReUsed(TR_RelocationRuntime *reloRuntime, char *changedMethodNam
 
             // 3. Ask the frontend to find the class
             TR_OpaqueClassBlock *classBlock = fej9->getClassFromSignature(className.c_str(), className.length(), agentContext, true);
-
+            TR_ASSERT_FATAL(classBlock, "Could not find class block for modified method: %s", className.c_str());
             if (classBlock)
             {
                J9Class *targetClass = (J9Class *)classBlock;
@@ -1297,13 +1297,13 @@ TR_RelocationRecordGroup::applyRelocations(TR_RelocationRuntime *reloRuntime,
 
          if (changedMethodNamesFile != NULL && comp->getOption(TR_smartAOTLoad) && rc != TR_RelocationErrorCode::inlinedMethodRelocationFailure && rc != TR_RelocationErrorCode::stringCompressionValidationFailure)
          {
-            auto start = std::chrono::high_resolution_clock::now();
+            // auto start = std::chrono::high_resolution_clock::now();
 
             bool reuse = testIfCanBeReUsed(reloRuntime, changedMethodNamesFile);
 
-            auto end = std::chrono::high_resolution_clock::now();
-            auto elapsed_us = std::chrono::duration_cast<std::chrono::microseconds>(end - start);
-            std::cout << elapsed_us.count() << " ";
+            // auto end = std::chrono::high_resolution_clock::now();
+            // auto elapsed_us = std::chrono::duration_cast<std::chrono::microseconds>(end - start);
+            // std::cout << elapsed_us.count() << " ";
             // std::cout.flush();
 
             RELO_LOG(reloRuntime->reloLogger(), 6, "\tINTERNAL ERROR!\n");

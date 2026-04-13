@@ -6787,7 +6787,7 @@ TR::CompilationInfoPerThreadBase::installAotCachedMethod(
       uintptr_t reloTime = 0;
 
       // I_64 wallClockMs = j9time_current_time_millis();
-      // j9tty_printf(PORTLIB, "[AOT Success] Epoch: %lld ms\n", (long long)wallClockMs);
+      // j9tty_printf(PORTLIB, "[AOT Success] for method %s: %lld ms\n", compiler->signature(), (long long)wallClockMs);
 
       if (TrcEnabled_Trc_JIT_AotLoadEnd)
       {
