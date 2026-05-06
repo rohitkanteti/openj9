@@ -78,14 +78,14 @@ public:
     void push(const std::set<PAGNode *> &s);
 
     std::set<StackFrame> pop();
-
-    std::set<int32_t> popInt();
-    std::set<int64_t> popLong();
-    std::set<float> popFloat();
-    std::set<double> popDouble();
-    std::set<bool> popBoolean();
-    std::set<PAGNode *> popRef();
-    bool merge(const operandStack &other);
+    std::set<StackFrame> pop(std::string fullNAME);
+    std::set<int32_t> popInt(std::string fullNAME);
+    std::set<int64_t> popLong(std::string fullNAME);
+    std::set<float> popFloat(std::string fullNAME);
+    std::set<double> popDouble(std::string fullNAME);
+    std::set<bool> popBoolean(std::string fullNAME);
+    std::set<PAGNode *> popRef(std::string fullNAME);
+    bool merge(const operandStack &other,std::string,int);
 
 private:
     std::vector<std::set<StackFrame>> stack;

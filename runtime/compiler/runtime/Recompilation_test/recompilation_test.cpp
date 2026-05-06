@@ -43,7 +43,7 @@ extern bool isReturnOrThrow(TR_J9ByteCode bc);
 extern bool isBranch(TR_J9ByteCode bc);
 extern bool isSwitch(TR_J9ByteCode bc);
 extern void executeBytecode(TR_J9ByteCode bytecode, uint8_t *pc, PointerAssignmentGraph *pag, operandStack *stack, TR_ResolvedMethod *resolvedMethod,
-                            J9Method *currentMethod, int methodIndex, int bci, std::unordered_map<int, PAGNode *> &variableMap, bool hasReturnType, TR::Compilation *comp, J9Class *J9currentClass, PAGNode *primitive_node, PAGNode *comp_type_2);
+                            J9Method *currentMethod, int methodIndex, int bci, std::unordered_map<int, PAGNode *> &variableMap, bool hasReturnType, TR::Compilation *comp, J9Class *J9currentClass, PAGNode *primitive_node, PAGNode *comp_type_2,std::string);
 
 void traverse_cfg(J9Method *method, PointerAssignmentGraph *pag, int methodIndex, TR::Compilation *comp, PAGNode *primitive_node, PAGNode *comp_type2_primitiveNode);
 extern std::unordered_set<std::string> getClassFields(J9Class *clazz, J9VMThread *vmThread);
@@ -758,7 +758,7 @@ public:
                 TR::VMAccessCriticalSection vmAccess(comp);
                 J9Class *currentClass = J9_CLASS_FROM_METHOD(method);
                 // auto start2 = std::chrono::high_resolution_clock::now();
-                executeBytecode(bytecode, pc, pag, stack, resolvedMethod, method, methodIndex, pcIndex, variableMap, hasReturnType, comp, currentClass, primitive_node, comp_type2_primitiveNode);
+                executeBytecode(bytecode, pc, pag, stack, resolvedMethod, method, methodIndex, pcIndex, variableMap, hasReturnType, comp, currentClass, primitive_node, comp_type2_primitiveNode,fullNAME);
                 // auto end2 = std::chrono::high_resolution_clock::now();
 
                 // std::cout << D_PREFIX << "Time taken to execute bytecode " << getBytecodeString(bytecode) << " at bci " << pcIndex << ": "
@@ -781,7 +781,7 @@ public:
                 {
                     operandStack *succStack = inStacks[succ];
 
-                    if (succStack->merge(*stack) && worklist_bb_bci.find(succBci) == worklist_bb_bci.end())
+                    if (succStack->merge(*stack,fullNAME,bb->startBCI) && worklist_bb_bci.find(succBci) == worklist_bb_bci.end())
                     {
                         worklist_bb_bci.insert(succBci);
                         worklist.push(succ);

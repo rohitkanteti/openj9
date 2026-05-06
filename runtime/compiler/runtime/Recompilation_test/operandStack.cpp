@@ -39,7 +39,10 @@ void operandStack::push(const std::set<PAGNode*> &s) {
 
 // === Pop ===
 
-std::set<StackFrame> operandStack::pop() {
+std::set<StackFrame> operandStack::pop(std::string fullNAME) {
+    if(stack.empty()) {
+        
+    }
     TR_ASSERT_FATAL(!stack.empty(), "Operand stack underflow");
     auto top = stack.back();
     stack.pop_back();
@@ -47,8 +50,8 @@ std::set<StackFrame> operandStack::pop() {
 }
 
 
-std::set<int32_t> operandStack::popInt() {
-    auto vals = pop();
+std::set<int32_t> operandStack::popInt(std::string fullNAME) {
+    auto vals = pop(fullNAME);
     std::set<int32_t> results;
     for (auto &sf : vals) {
         TR_ASSERT_FATAL(sf.type == OperandType::INT, "Expected INT");
@@ -57,8 +60,8 @@ std::set<int32_t> operandStack::popInt() {
     return results;
 }
 
-std::set<int64_t> operandStack::popLong() {
-    auto vals = pop();
+std::set<int64_t> operandStack::popLong(std::string fullNAME) {
+    auto vals = pop(fullNAME);
     std::set<int64_t> results;
     for (auto &sf : vals) {
         TR_ASSERT_FATAL(sf.type == OperandType::LONG, "Expected LONG");
@@ -67,8 +70,8 @@ std::set<int64_t> operandStack::popLong() {
     return results;
 }
 
-std::set<float> operandStack::popFloat() {
-    auto vals = pop();
+std::set<float> operandStack::popFloat(std::string fullNAME) {
+    auto vals = pop(fullNAME);
     std::set<float> results;
     for (auto &sf : vals) {
         TR_ASSERT_FATAL(sf.type == OperandType::FLOAT, "Expected FLOAT");
@@ -77,8 +80,8 @@ std::set<float> operandStack::popFloat() {
     return results;
 }
 
-std::set<double> operandStack::popDouble() {
-    auto vals = pop();
+std::set<double> operandStack::popDouble(std::string fullNAME) {
+    auto vals = pop(fullNAME);
     std::set<double> results;
     for (auto &sf : vals) {
         TR_ASSERT_FATAL(sf.type == OperandType::DOUBLE, "Expected DOUBLE");
@@ -87,8 +90,8 @@ std::set<double> operandStack::popDouble() {
     return results;
 }
 
-std::set<bool> operandStack::popBoolean() {
-    auto vals = pop();
+std::set<bool> operandStack::popBoolean(std::string fullNAME) {
+    auto vals = pop(fullNAME);
     std::set<bool> results;
     for (auto &sf : vals) {
         TR_ASSERT_FATAL(sf.type == OperandType::BOOLEAN_VALUE, "Expected BOOLEAN");
@@ -97,8 +100,8 @@ std::set<bool> operandStack::popBoolean() {
     return results;
 }
 
-std::set<PAGNode*> operandStack::popRef() {
-    auto vals = pop();
+std::set<PAGNode*> operandStack::popRef(std::string fullNAME) {
+    auto vals = pop(fullNAME);
     std::set<PAGNode*> results;
     for (auto &sf : vals) {
         TR_ASSERT_FATAL(sf.type == OperandType::REFERENCE, "Expected REFERENCE");
@@ -119,11 +122,12 @@ operandStack& operandStack::operator=(const operandStack &other) {
 }
 
 
-bool operandStack::merge(const operandStack &other)
+bool operandStack::merge(const operandStack &other,std::string fullNAME,int startBCI)
 {   
     if(stack.size() != other.stack.size())
     {
-        std::cout << "stacks not equal !!" << std::endl;
+        std::cout << "stacks not equal while analyzing " << fullNAME << " at BCI " << startBCI << std::endl;
+        std::cout << "Current stack size: " << stack.size() << ", Other stack size: " << other.stack.size() << std::endl;
     }
     TR_ASSERT_FATAL(stack.size() == other.stack.size(),"Merging stacks of different heights is not supported");
 
