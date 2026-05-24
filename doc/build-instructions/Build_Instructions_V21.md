@@ -78,7 +78,7 @@ bash mkdocker.sh --tag=openj9 --dist=ubuntu --version=22 --gitcache=no --jdk=21 
 3. Start a Docker container from the **openj9** image with the following command, where `-v` maps any directory, `<host_directory>`,
 on your local system to the containers `/root/hostdir` directory so that you can store the binaries, once they are built:
 ```
-docker run -v <host_directory>:/root/hostdir -it openj9
+docker run -v <host_directory>:/root/hostdir -it -u root openj9
 ```
 
 :pencil: Depending on your [Docker system configuration](https://docs.docker.com/engine/reference/commandline/cli/#description), you might need to prefix the `docker` commands with `sudo`.
