@@ -1079,6 +1079,7 @@ class TR_RelocationRecordValidateClass : public TR_RelocationRecordConstantPoolW
       TR_RelocationRecordValidateClass(TR_RelocationRuntime *reloRuntime, TR_RelocationRecordBinaryTemplate *record) : TR_RelocationRecordConstantPoolWithIndex(reloRuntime, record) {}
       virtual const char *name();
       virtual void print(TR_RelocationRuntime *reloRuntime);
+      virtual bool isValidationRecord() { return true; }
 
       virtual bool isStaticFieldValidation() { return false ; }
 
@@ -1131,6 +1132,7 @@ class TR_RelocationRecordValidateArbitraryClass : public TR_RelocationRecord
       TR_RelocationRecordValidateArbitraryClass(TR_RelocationRuntime *reloRuntime, TR_RelocationRecordBinaryTemplate *record) : TR_RelocationRecord(reloRuntime, record) {}
       virtual const char *name();
       virtual void print(TR_RelocationRuntime *reloRuntime);
+      virtual bool isValidationRecord() { return true; }
 
       void setClassChainIdentifyingLoaderOffset(TR_RelocationTarget *reloTarget, uintptr_t classChainOffset,
                                                 TR::AheadOfTimeCompile *aotCompile, const AOTCacheClassChainRecord *classChainRecord);

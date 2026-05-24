@@ -390,6 +390,103 @@ long getClassFileTimestamp(J9Class *clazz, TR::Compilation *comp)
    return -1;
 }
 
+// ---------------------------------------------------------------------------
+// Registry lookup helper
+//
+// Calls HotRunLoadingAgent.getV2Class(internalName) via JNI and returns the
+// J9Class* from the resulting jclass.  Returns nullptr if the registry is
+// empty, the class is not found, or the agent has not initialised yet.
+//
+// This is the ONLY reliable path during early relocation validation because:
+//   - classLoaderBlocks only contains loaders whose native peer has been
+//     allocated by the GC, which may not include the sandbox loader yet
+//     if the GC safepoint hasn't fired since Class.forName() returned
+//   - getClassFromSignature resolves relative to a resolvedMethod's loader
+//     which at relocation time has not yet seen these classes
+// ---------------------------------------------------------------------------
+// ---------------------------------------------------------------------------
+// Low-Level Registry lookup helper (Safely handles J9VM Thread States)
+// ---------------------------------------------------------------------------
+// ---------------------------------------------------------------------------
+// Low-Level Registry lookup helper (Maintains Thread State Invariants)
+// ---------------------------------------------------------------------------
+static J9Class *lookupInAgentRegistry(J9VMThread *vmThread, const std::string &internalName)
+{
+   J9JavaVM *javaVM = vmThread->javaVM;
+   JNIEnv *env = (JNIEnv *)vmThread;
+   jclass liveV2ClassObj = nullptr;
+   J9Class *result = nullptr;
+
+   // 1. Capture the exact entry state of the calling thread context
+   bool wasInNative = (vmThread->inNative != 0);
+
+   // 2. Ensure we are in Native State (inNative == 1) to make public JNI calls safely
+   if (!wasInNative)
+   {
+      javaVM->internalVMFunctions->internalExitVMToJNI(vmThread);
+   }
+
+   jclass agentClass = env->FindClass("HotRunLoadingAgent");
+   if (agentClass && !env->ExceptionCheck())
+   {
+      jmethodID getV2ClassMID = env->GetStaticMethodID(
+          agentClass, "getV2Class", "(Ljava/lang/String;)Ljava/lang/Class;");
+      
+      if (getV2ClassMID && !env->ExceptionCheck())
+      {
+         jstring jname = env->NewStringUTF(internalName.c_str());
+         if (jname && !env->ExceptionCheck())
+         {
+            jobject rawObj = env->CallStaticObjectMethod(agentClass, getV2ClassMID, jname);
+            if (rawObj && !env->ExceptionCheck())
+            {
+               liveV2ClassObj = (jclass)rawObj;
+            }
+            env->DeleteLocalRef(jname);
+         }
+      }
+      env->DeleteLocalRef(agentClass);
+   }
+
+   if (env->ExceptionCheck())
+   {
+      env->ExceptionClear();
+   }
+
+   // 3. Resolve the object structure handles
+   if (liveV2ClassObj != nullptr)
+   {
+      // We MUST hold VM Access (Java State, inNative == 0) to parse raw heap objects safely
+      javaVM->internalVMFunctions->internalEnterVMFromJNI(vmThread);
+
+      result = J9VM_J9CLASS_FROM_JCLASS(vmThread, liveV2ClassObj);
+      
+      // Return momentarily to Native State to safely drop the JNI local handle
+      javaVM->internalVMFunctions->internalExitVMToJNI(vmThread);
+      env->DeleteLocalRef(liveV2ClassObj);
+   }
+
+   // ------------------------------------------------------------------
+   // CRITICAL RESTORATION INVARIANT
+   // Restore the thread to the EXACT state it was in before we hijacked it.
+   // If the caller expects Java State, return in Java State. 
+   // If the caller expects Native State, return in Native State.
+   // ------------------------------------------------------------------
+   if (!wasInNative)
+   {
+      javaVM->internalVMFunctions->internalEnterVMFromJNI(vmThread);
+   }
+   else
+   {
+      // If the caller was native, ensure we are native on exit
+      if (vmThread->inNative == 0)
+      {
+         javaVM->internalVMFunctions->internalExitVMToJNI(vmThread);
+      }
+   }
+
+   return result;
+}
 /**
  * Single-pass traversal of all ClassLoaders using GC_PoolIterator (fixes compilation errors).
  * Filters out any classes that are resident in the Shared Classes Cache (SCC) based on the loader flag.
@@ -399,54 +496,74 @@ std::map<std::string, J9Class *> findMultipleClassesAcrossLoaders(
     const std::set<std::string> &targetClassNames,
     TR_J9VMBase *fej9)
 {
-   std::map<std::string, J9Class *> foundMap;
-   TR::VMAccessCriticalSection vmAccess(comp);
+    std::map<std::string, J9Class *> foundMap;
+    J9VMThread *vmThread = fej9->getCurrentVMThread();
+    J9JavaVM *javaVM = vmThread->javaVM;
 
-   // Fix: Correct way to get J9JavaVM in this OpenJ9 version
-   J9VMThread *vmThread = fej9->getCurrentVMThread();
-   J9JavaVM *javaVM = vmThread->javaVM;
+    // Capture the caller's thread state so we can restore it on every return path.
+    // JIT compilation threads hold VM access (inNative == 0); other callers may
+    // arrive in native state (inNative == 1).  We must leave the thread in the
+    // same state we found it to satisfy the VM access invariants.
+    bool wasInNative = (vmThread->inNative != 0);
 
-   // Fix: Use GC_PoolIterator over classLoaderBlocks instead of classLoaderList
-   GC_PoolIterator classLoaderIterator(javaVM->classLoaderBlocks);
-   J9ClassLoader *classLoader = nullptr;
+    // Step 1: Registry lookup — lookupInAgentRegistry handles its own
+    // enter/exit transitions internally and restores the original state.
+    for (const std::string &targetName : targetClassNames)
+    {
+        J9Class *fromRegistry = lookupInAgentRegistry(vmThread, targetName);
+        if (fromRegistry)
+        {
+            foundMap[targetName] = fromRegistry;
+            fprintf(stderr, "[VALIDATOR] Registry hit for '%s'\n", targetName.c_str());
+        }
+    }
 
-   while (nullptr != (classLoader = (J9ClassLoader *)classLoaderIterator.nextSlot()))
-   {
-      J9HashTableState walkState;
-      J9Class *currentClass = javaVM->internalVMFunctions->hashClassTableStartDo(classLoader, &walkState, 0);
+    if (foundMap.size() == targetClassNames.size())
+        return foundMap;
 
-      while (currentClass)
-      {
-         // --- CRITICAL SCC CHECK ---
-         // Use the requested logic to ensure it's not from SCC
-         J9ClassLoader *loader = currentClass->classLoader;
-         if (!(loader->flags & J9CLASSLOADER_SHARED_CLASSES_ENABLED))
-         {
-            J9UTF8 *nameUTF8 = J9ROMCLASS_CLASSNAME(currentClass->romClass);
-            std::string currentClassName((char *)J9UTF8_DATA(nameUTF8), J9UTF8_LENGTH(nameUTF8));
+    // Step 2: GC_PoolIterator walk requires VM access.
+    // Only transition into the VM if the thread is currently in native state.
+    if (vmThread->inNative)
+        javaVM->internalVMFunctions->internalEnterVMFromJNI(vmThread);
 
-            // Check if this class is one of our targets
-            if (targetClassNames.count(currentClassName))
+    GC_PoolIterator classLoaderIterator(javaVM->classLoaderBlocks);
+    J9ClassLoader *classLoader = nullptr;
+
+    while (nullptr != (classLoader = (J9ClassLoader *)classLoaderIterator.nextSlot()))
+    {
+        J9HashTableState walkState;
+        J9Class *currentClass = javaVM->internalVMFunctions->hashClassTableStartDo(
+            classLoader, &walkState, 0);
+        while (currentClass)
+        {
+            J9ClassLoader *loader = currentClass->classLoader;
+            if (!(loader->flags & J9CLASSLOADER_SHARED_CLASSES_ENABLED))
             {
-               // Respect loader delegation: only keep the first non-shared instance found
-               if (foundMap.find(currentClassName) == foundMap.end())
-               {
-                  foundMap[currentClassName] = currentClass;
-               }
+                J9UTF8 *nameUTF8 = J9ROMCLASS_CLASSNAME(currentClass->romClass);
+                std::string currentClassName((char *)J9UTF8_DATA(nameUTF8), J9UTF8_LENGTH(nameUTF8));
+                if (targetClassNames.count(currentClassName) &&
+                    foundMap.find(currentClassName) == foundMap.end())
+                {
+                    foundMap[currentClassName] = currentClass;
+                }
             }
-         }
+            if (foundMap.size() == targetClassNames.size())
+            {
+                // Restore the caller's original thread state before returning.
+                if (wasInNative)
+                    javaVM->internalVMFunctions->internalExitVMToJNI(vmThread);
+                return foundMap;
+            }
+            currentClass = javaVM->internalVMFunctions->hashClassTableNextDo(&walkState);
+        }
+    }
 
-         // Early exit if we found non-shared versions of all target classes
-         if (foundMap.size() == targetClassNames.size())
-            return foundMap;
-
-         currentClass = javaVM->internalVMFunctions->hashClassTableNextDo(&walkState);
-      }
-   }
-   return foundMap;
+    // Restore the caller's original thread state before returning.
+    if (wasInNative)
+        javaVM->internalVMFunctions->internalExitVMToJNI(vmThread);
+    return foundMap;
 }
-
-// bool testIfCanBeReUsed(TR_RelocationRuntime *reloRuntime, char *changedMethodNamesFile)
+ // bool testIfCanBeReUsed(TR_RelocationRuntime *reloRuntime, char *changedMethodNamesFile)
 // {
 
 //    TR_ResolvedMethod *resolvedMethod = reloRuntime->currentResolvedMethod();
@@ -1019,10 +1136,19 @@ bool testIfCanBeReUsed(TR_RelocationRuntime *reloRuntime, char *changedMethodNam
       TR_ResolvedMethod *contextMethod = reloRuntime->currentResolvedMethod();
 
       J9Class *agentJ9Class = findClassAcrossAllLoaders(comp, "HotRunLoadingAgent", fej9, contextMethod);
-      TR_ASSERT_FATAL(agentJ9Class, "Could not find HotRunLoadingAgent class block!");
+      // TR_ASSERT_FATAL(agentJ9Class, "Could not find HotRunLoadingAgent class block!");
+      if (!agentJ9Class)
+      {
+         // Agent not present (cold run) or not yet visible in classLoaderBlocks.
+         // lookupInAgentRegistry handles the registry path directly via JNI —
+         // we do not need agentJ9Class for anything else. Skip this block.
+         fprintf(stderr, "[VALIDATOR] HotRunLoadingAgent not found via loader walk — "
+                        "registry lookup will handle V2 class resolution directly.\n");
+      }
 
-      J9Method *anyAgentMethod = &(agentJ9Class->ramMethods[0]);
-      TR_ResolvedMethod *agentContext = fej9->createResolvedMethod(comp->trMemory(), (TR_OpaqueMethodBlock *)anyAgentMethod, NULL);
+
+      // J9Method *anyAgentMethod = &(agentJ9Class->ramMethods[0]);
+      // TR_ResolvedMethod *agentContext = fej9->createResolvedMethod(comp->trMemory(), (TR_OpaqueMethodBlock *)anyAgentMethod, NULL);
 
       // --- NEW: EXTRACT UNIQUE CLASSES AND PERFORM BATCH LOOKUP ---
       // This ensures we find the RAM-resident classes the Agent just forced to load
@@ -1599,6 +1725,21 @@ TR_RelocationRecordGroup::wellKnownClassChainOffsets(
    return reinterpret_cast<const uintptr_t *>(classChains);
 }
 
+bool isSalvageableRelocationError(TR_RelocationErrorCode rc) {
+    switch (rc) {
+        // ONLY accept basic class identity anomalies where layouts remain identical
+        case TR_RelocationErrorCode::classValidationFailure:
+        case TR_RelocationErrorCode::classByNameValidationFailure:
+        case TR_RelocationErrorCode::arbitraryClassValidationFailure:
+        case TR_RelocationErrorCode::systemClassByNameValidationFailure:
+            return true;
+
+        // FATAL SEGFAULT RISKS: Immediately reject method, field, or signature changes.
+        // Bypassing method/signature constraints will poison inline caches and crash the VM!
+        default:
+            return false;
+    }
+}
 TR_RelocationErrorCode
 TR_RelocationRecordGroup::applyRelocations(TR_RelocationRuntime *reloRuntime,
                                            TR_RelocationTarget *reloTarget,
@@ -1636,19 +1777,19 @@ TR_RelocationRecordGroup::applyRelocations(TR_RelocationRuntime *reloRuntime,
          aotStats->numRelocationsFailedByType[reloType]++;
          TR::Compilation *comp = reloRuntime->comp();
          char *changedMethodNamesFile = comp->getOptions()->getchangedMethodNamesFile();
-
-         if (changedMethodNamesFile != NULL && comp->getOption(TR_smartAOTLoad) && rc != TR_RelocationErrorCode::inlinedMethodRelocationFailure && rc != TR_RelocationErrorCode::stringCompressionValidationFailure)
+         // if(!reloRecord->isValidationRecord())
+         // {
+         //    std::cout << "DEBUG_RELO : its not a validation record, rc =" << reloRuntime->getReloErrorCodeName(rc) << std::endl;
+         // }
+         if (changedMethodNamesFile != NULL && comp->getOption(TR_smartAOTLoad) && reloRecord->isValidationRecord() && isSalvageableRelocationError(rc))
          {
             // auto start = std::chrono::high_resolution_clock::now();
-
             bool reuse = testIfCanBeReUsed(reloRuntime, changedMethodNamesFile);
 
             // auto end = std::chrono::high_resolution_clock::now();
             // auto elapsed_us = std::chrono::duration_cast<std::chrono::microseconds>(end - start);
             // std::cout << elapsed_us.count() << " ";
             // std::cout.flush();
-
-            RELO_LOG(reloRuntime->reloLogger(), 6, "\tINTERNAL ERROR!\n");
 
             if (reuse == CAN_BE_REUSED)
             {
@@ -1677,6 +1818,9 @@ TR_RelocationRecordGroup::applyRelocations(TR_RelocationRuntime *reloRuntime,
             // {
             //    // std::cout << "Cannot be reused!!\n";
             // }
+
+            RELO_LOG(reloRuntime->reloLogger(), 6, "\tINTERNAL ERROR!\n");
+
          }
 
          return rc;
@@ -6811,13 +6955,13 @@ void TR_RelocationRecordPointer::preparePrivateData(TR_RelocationRuntime *reloRu
       classLoader = (J9ClassLoader *)sharedCache->lookupClassLoaderAssociatedWithClassChain(classChainIdentifyingLoader);
       RELO_LOG(reloRuntime->reloLogger(), 6, "\tpreparePrivateData: classLoader %p\n", classLoader);
 
-      if (classLoader != NULL)
-      {
-         uintptr_t *classChain = (uintptr_t *)sharedCache->pointerFromOffsetInSharedCache(classChainForInlinedMethod(reloTarget));
-         RELO_LOG(reloRuntime->reloLogger(), 6, "\tpreparePrivateData: classChain %p\n", classChain);
-         classPointer = (J9Class *)sharedCache->lookupClassFromChainAndLoader(classChain, (void *)classLoader, reloRuntime->comp());
-         RELO_LOG(reloRuntime->reloLogger(), 6, "\tpreparePrivateData: classPointer %p\n", classPointer);
-      }
+         if (classLoader != NULL)
+         {
+            uintptr_t *classChain = (uintptr_t *)sharedCache->pointerFromOffsetInSharedCache(classChainForInlinedMethod(reloTarget));
+            RELO_LOG(reloRuntime->reloLogger(), 6, "\tpreparePrivateData: classChain %p\n", classChain);
+            classPointer = (J9Class *)sharedCache->lookupClassFromChainAndLoader(classChain, (void *)classLoader, reloRuntime->comp());
+            RELO_LOG(reloRuntime->reloLogger(), 6, "\tpreparePrivateData: classPointer %p\n", classPointer);
+         }
    }
    else
       RELO_LOG(reloRuntime->reloLogger(), 6, "\tpreparePrivateData: inlined site invalid\n");

@@ -1435,6 +1435,27 @@ TR_J9SharedCache::lookupClassFromChainAndLoader(uintptr_t *chainData, void *clas
    if (clazz != NULL && classMatchesCachedVersion(clazz, chainData))
       return (TR_OpaqueClassBlock *)clazz;
 
+   // smartAOT: accept class found by name even if chain doesn't match.
+   // In smartAOT mode, classes are bytecode-identical but loaded from
+   // repackaged JARs, so their SCC class chains differ. The class is
+   // still valid for relocation purposes.
+   if (comp != NULL && comp->getOption(TR_smartAOTLoad))
+   {
+      J9ClassLoader *contextLoader = (J9ClassLoader *)classLoader;
+      TR_OpaqueMethodBlock *method = comp->getCurrentMethod() ? comp->getCurrentMethod()->getPersistentIdentifier() : NULL;
+      if (method)
+      {
+         J9Class *methodClass = (J9Class *)fej9->getClassOfMethod(method);
+         if (methodClass && methodClass->classLoader)
+            contextLoader = methodClass->classLoader;
+      }
+      
+      J9Class *newClazz = jitGetClassInClassloaderFromUTF8(vmThread, contextLoader,
+                                                           (char *)J9UTF8_DATA(className), J9UTF8_LENGTH(className));
+      if (newClazz)
+         return (TR_OpaqueClassBlock *)newClazz;
+   }
+
    return NULL;
    }
 
