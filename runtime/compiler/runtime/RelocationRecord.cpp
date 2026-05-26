@@ -537,7 +537,7 @@ std::map<std::string, J9Class *> findMultipleClassesAcrossLoaders(
         while (currentClass)
         {
             J9ClassLoader *loader = currentClass->classLoader;
-            if (!(loader->flags & J9CLASSLOADER_SHARED_CLASSES_ENABLED))
+            // if (!(loader->flags & J9CLASSLOADER_SHARED_CLASSES_ENABLED))
             {
                 J9UTF8 *nameUTF8 = J9ROMCLASS_CLASSNAME(currentClass->romClass);
                 std::string currentClassName((char *)J9UTF8_DATA(nameUTF8), J9UTF8_LENGTH(nameUTF8));
@@ -1210,7 +1210,7 @@ bool testIfCanBeReUsed(TR_RelocationRuntime *reloRuntime, char *changedMethodNam
 
                   // For SmartAOT research, you should likely return false here to prevent
                   // recompilation against the wrong bytecode version.
-                  // return NEED_TO_RECOMPILE;
+                  return NEED_TO_RECOMPILE;
                }
                J9Class *targetClass = (J9Class *)classBlock;
                J9ROMClass *romClass = targetClass->romClass;
