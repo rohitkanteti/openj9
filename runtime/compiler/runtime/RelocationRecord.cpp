@@ -73,6 +73,9 @@
 #include <chrono>
 #include <sys/stat.h>
 #include <stdio.h>
+#include "infra/CriticalSection.hpp"
+#include "infra/Monitor.hpp"
+#include <stdio.h>
 #include <algorithm> // For std::replace
 #include "j9.h"
 #include "rommeth.h"
@@ -143,8 +146,6 @@ static std::unordered_map<std::string, long> verified_method_timestamps;
 // ---
 std::atomic<bool> pag_loading_started{false};
 std::atomic<bool> pag_loading_finished{false};
-std::mutex pag_wait_mutex;
-std::condition_variable pag_wait_cv;
 PointerAssignmentGraph *global_loaded_pag = nullptr;
 
 void backgroundPAGLoaderTask()
@@ -186,15 +187,12 @@ void backgroundPAGLoaderTask()
    }
 
    {
-      std::lock_guard<std::mutex> lock(pag_wait_mutex);
       global_loaded_pag = temp_pag;
 
       analysedMethodNames.insert(temp_analyzedMethods.begin(), temp_analyzedMethods.end());
 
       pag_loading_finished = true;
    }
-
-   pag_wait_cv.notify_all();
 }
 
 void startPAGLoaderThread()
@@ -708,8 +706,7 @@ std::map<std::string, J9Class *> findMultipleClassesAcrossLoaders(
 //       }
 
 //       // Wait for the background thread to finish
-//       std::unique_lock<std::mutex> wait_lock(pag_wait_mutex);
-//       pag_wait_cv.wait(wait_lock, []{ return pag_loading_finished.load(); });
+//       while (!pag_loading_finished.load()) { j9thread_sleep(10); }
 
 //       loaded_pag = global_loaded_pag;
 //       TR_ASSERT_FATAL(loaded_pag, "PAG should has not been loaded by the background thread !!");
@@ -1098,11 +1095,9 @@ bool testIfCanBeReUsed(TR_RelocationRuntime *reloRuntime, char *changedMethodNam
          startPAGLoaderThread();
          std::cout << D_PREFIX << "Started PAG loader thread from testIfCanBeReUsed as fallback." << std::endl;
       }
-
-      // auto start_wait = std::chrono::steady_clock::now();
-      std::unique_lock<std::mutex> wait_lock(pag_wait_mutex);
-      pag_wait_cv.wait(wait_lock, []
-                       { return pag_loading_finished.load(); });
+      while (!pag_loading_finished.load()) {
+         j9thread_sleep(10);
+      }
       auto end_wait = std::chrono::steady_clock::now();
       // auto duration_ms = std::chrono::duration_cast<std::chrono::microseconds>(end_wait - start_wait).count();
 
