@@ -213,6 +213,44 @@ class recompilation_test
 public:
     TR_RelocationRuntime *reloRuntime;
 
+    std::unordered_set<std::string> get_types(PAGNode* v, PointerAssignmentGraph *p) {
+        std::unordered_set<std::string> types;
+        for (PAGNode* obj : p->points_to(v)) {
+            if (obj->type == NEW) {
+                if (!obj->comp_type.empty() && obj->comp_type != "type1" && obj->comp_type != "COMP_TYPE_2") {
+                    types.insert(obj->comp_type);
+                } else if (!obj->class_name.empty()) {
+                    types.insert(obj->class_name);
+                } else if (!obj->static_type.empty()) {
+                    types.insert(obj->static_type);
+                }
+            }
+        }
+        return types;
+    }
+
+    bool check_pa_inlining(int mx, PointerAssignmentGraph *p_prime, const std::unordered_map<std::string, std::unordered_set<std::string>>& old_callsite_types) {
+        for (const auto& pair : old_callsite_types) {
+            const std::string& callsite_key = pair.first;
+            const std::unordered_set<std::string>& old_types = pair.second;
+            
+            auto it = p_prime->CG.callsiteParams.find(callsite_key);
+            if (it == p_prime->CG.callsiteParams.end() || it->second.empty()) continue;
+            PAGNode* receiver = it->second[0];
+            
+            std::unordered_set<std::string> new_types = get_types(receiver, p_prime);
+            
+            if (old_types.size() == 1 && (new_types.size() > 1 || old_types != new_types)) {
+                return true; 
+            }
+            
+            if (old_types.size() > 1 && new_types.size() == 1) {
+                return true; 
+            }
+        }
+        return false;
+    }
+
     int getOrInsertMethodIndex(std::string methodName, PointerAssignmentGraph *pag)
     {
         if (pag->_methodIndices.find(methodName) != pag->_methodIndices.end())

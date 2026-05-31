@@ -130,6 +130,7 @@ enum recompile_test_answers
 bool smartAOTLoad = false;
 static unordered_map<int, unordered_set<PAGEdge *>> methodIndex_to_old_allocs;
 static unordered_map<int, unordered_set<PAGNode *>> methodIndex_to_old_escapes;
+static std::unordered_map<int, std::unordered_map<std::string, std::unordered_set<std::string>>> methodIndex_to_old_callsite_types;
 static bool old_allocs_gathered = false;
 static std::unordered_map<int, recompile_test_answers> methodIndex_to_CanItBeResused;
 static std::unordered_set<std::string> modified_method_names;
@@ -1120,11 +1121,24 @@ bool testIfCanBeReUsed(TR_RelocationRuntime *reloRuntime, char *changedMethodNam
       {
          methodIndex_to_old_allocs[ind] = loaded_pag->getAllocEdges(ind);
          methodIndex_to_old_escapes[ind] = loaded_pag->getEscapingObjects(ind);
+         
+         std::unordered_map<std::string, std::unordered_set<std::string>> old_callsite_types;
+         for (const auto &entry : loaded_pag->CG.callsiteParams) {
+             std::istringstream iss(entry.first);
+             int caller, calleeMethodIndex, bci;
+             iss >> caller >> calleeMethodIndex >> bci;
+             if (caller == ind && !entry.second.empty()) {
+                 PAGNode* receiver = entry.second[0];
+                 old_callsite_types[entry.first] = rec_test.get_types(receiver, loaded_pag);
+             }
+         }
+         methodIndex_to_old_callsite_types[ind] = old_callsite_types;
       }
    }
 
    const unordered_set<PAGEdge *> &allocs = methodIndex_to_old_allocs[mx];
    const unordered_set<PAGNode *> &escapes = methodIndex_to_old_escapes[mx];
+   const std::unordered_map<std::string, std::unordered_set<std::string>> &old_callsite_types = methodIndex_to_old_callsite_types[mx];
 
    if (!PAGupdated)
    {
@@ -1285,8 +1299,10 @@ bool testIfCanBeReUsed(TR_RelocationRuntime *reloRuntime, char *changedMethodNam
       updateMatchEdges(updated_pag);
    }
 
-   bool recompile = rec_test.should_recompile(mx, updated_pag, allocs, escapes);
-   if (recompile)
+   bool recompile_ea = rec_test.should_recompile(mx, updated_pag, allocs, escapes);
+   bool recompile_pa = rec_test.check_pa_inlining(mx, updated_pag, old_callsite_types);
+   
+   if (recompile_ea || recompile_pa)
    {
       methodIndex_to_CanItBeResused[mx] = RECOMPILE;
       result_cache[mx_methodSignature] = NEED_TO_RECOMPILE;
@@ -1732,6 +1748,13 @@ bool isSalvageableRelocationError(TR_RelocationErrorCode rc) {
         case TR_RelocationErrorCode::classByNameValidationFailure:
         case TR_RelocationErrorCode::arbitraryClassValidationFailure:
         case TR_RelocationErrorCode::systemClassByNameValidationFailure:
+        case TR_RelocationErrorCode::virtualMethodFromCPValidationFailure:
+        case TR_RelocationErrorCode::virtualMethodFromOffsetValidationFailure:
+        case TR_RelocationErrorCode::methodFromSingleImplValidationFailure:
+        case TR_RelocationErrorCode::methodFromSingleInterfaceImplValidationFailure:
+        case TR_RelocationErrorCode::methodFromSingleAbstractImplValidationFailure:
+        case TR_RelocationErrorCode::methodFromClassValidationFailure:
+        case TR_RelocationErrorCode::methodFromClassAndSigValidationFailure:
             return true;
 
         // FATAL SEGFAULT RISKS: Immediately reject method, field, or signature changes.
