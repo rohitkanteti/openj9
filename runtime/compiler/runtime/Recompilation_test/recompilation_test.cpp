@@ -428,6 +428,18 @@ public:
     {
         auto leaky_nodes = p_prime->getLeakyNodes();
 
+        PAGNode* retNode = p_prime->getReturnNode(mx);
+        if (retNode != nullptr) {
+            leaky_nodes.insert(retNode);
+        }
+
+        std::vector<PAGNode*> formalParams = p_prime->getFormalParameterNodes(mx);
+        for (PAGNode* paramNode : formalParams) {
+            if (paramNode != nullptr) {
+                leaky_nodes.insert(paramNode);
+            }
+        }
+
         for (PAGEdge *alloc_edge : old_allocated_edges)
         {
             PAGNode *o = alloc_edge->src;

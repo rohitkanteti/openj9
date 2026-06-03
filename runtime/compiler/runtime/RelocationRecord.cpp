@@ -150,16 +150,17 @@ PointerAssignmentGraph *global_loaded_pag = nullptr;
 
 void backgroundPAGLoaderTask()
 {
+   try {
    //  auto start = std::chrono::high_resolution_clock::now();
 
-   std::string nodes = "nodes.txt.gz";
-   std::string edges = "PAGEdges.txt.gz";
-   std::string methods = "methodIndex_to_PAGNodes.txt.gz";
-   std::string callgraph = "callgraph.txt.gz";
-   std::string threadAccess = "threadAccesible.txt.gz";
-   std::string staticFields = "staticFields.txt.gz";
+      std::string nodes = "nodes.txt.gz";
+      std::string edges = "PAGEdges.txt.gz";
+      std::string methods = "methodIndex_to_PAGNodes.txt.gz";
+      std::string callgraph = "callgraph.txt.gz";
+      std::string threadAccess = "threadAccesible.txt.gz";
+      std::string staticFields = "staticFields.txt.gz";
 
-   LoadPAG loader(nodes, edges, methods, callgraph, threadAccess, staticFields);
+      LoadPAG loader(nodes, edges, methods, callgraph, threadAccess, staticFields);
    PointerAssignmentGraph *temp_pag = loader.getPAG();
    //  auto end = std::chrono::high_resolution_clock::now();
    // std::cout << D_PREFIX << " PAG loaded in background took " << std::chrono::duration_cast<std::chrono::microseconds>(end - start).count() << " microseconds\n";
@@ -186,11 +187,16 @@ void backgroundPAGLoaderTask()
       gzclose(file);
    }
 
-   {
-      global_loaded_pag = temp_pag;
+   global_loaded_pag = temp_pag;
+   analysedMethodNames.insert(temp_analyzedMethods.begin(), temp_analyzedMethods.end());
+   pag_loading_finished = true;
 
-      analysedMethodNames.insert(temp_analyzedMethods.begin(), temp_analyzedMethods.end());
-
+   } catch (const std::exception& e) {
+      std::cerr << "CRITICAL ERROR in backgroundPAGLoaderTask: " << e.what() << std::endl;
+      // Ensure we don't hang the application threads even if loading fails!
+      pag_loading_finished = true;
+   } catch (...) {
+      std::cerr << "UNKNOWN FATAL ERROR in backgroundPAGLoaderTask" << std::endl;
       pag_loading_finished = true;
    }
 }
@@ -1116,18 +1122,16 @@ bool testIfCanBeReUsed(TR_RelocationRuntime *reloRuntime, char *changedMethodNam
       {
          methodIndex_to_old_allocs[ind] = loaded_pag->getAllocEdges(ind);
          methodIndex_to_old_escapes[ind] = loaded_pag->getEscapingObjects(ind);
-         
-         std::unordered_map<std::string, std::unordered_set<std::string>> old_callsite_types;
-         for (const auto &entry : loaded_pag->CG.callsiteParams) {
-             std::istringstream iss(entry.first);
-             int caller, calleeMethodIndex, bci;
-             iss >> caller >> calleeMethodIndex >> bci;
-             if (caller == ind && !entry.second.empty()) {
-                 PAGNode* receiver = entry.second[0];
-                 old_callsite_types[entry.first] = rec_test.get_types(receiver, loaded_pag);
-             }
-         }
-         methodIndex_to_old_callsite_types[ind] = old_callsite_types;
+      }
+      
+      for (const auto &entry : loaded_pag->CG.callsiteParams) {
+          if (!entry.second.empty()) {
+              int caller = 0, calleeMethodIndex = 0, bci = 0;
+              if (sscanf(entry.first.c_str(), "%d %d %d", &caller, &calleeMethodIndex, &bci) == 3) {
+                  PAGNode* receiver = entry.second[0];
+                  methodIndex_to_old_callsite_types[caller][entry.first] = rec_test.get_types(receiver, loaded_pag);
+              }
+          }
       }
    }
 
