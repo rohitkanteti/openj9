@@ -384,15 +384,23 @@ public:
         return p->threadAccessibleFields.find(field) != p->threadAccessibleFields.end();
     }
 
+    bool containsNode(const std::unordered_set<PAGNode*>& objs, PAGNode* target) {
+        for (auto* obj : objs) {
+            if (obj->methodIndex == target->methodIndex && obj->bci == target->bci) {
+                return true;
+            }
+        }
+        return false;
+    }
+
     bool REACH(PAGNode *target_obj, PAGNode *start_node, PointerAssignmentGraph *p)
     {
         const auto &objs = p->points_to(start_node);
-        if (objs.find(target_obj) != objs.end())
+        if (containsNode(objs, target_obj))
             return true;
-
+        
         std::unordered_set<PAGNode *> visited;
         std::queue<PAGNode *> queue;
-
         queue.push(start_node);
         visited.insert(start_node);
 
@@ -400,27 +408,23 @@ public:
         {
             PAGNode *current_node = queue.front();
             queue.pop();
-
             for (const std::string &field : p->get_fields(current_node))
             {
                 const auto &next_nodes = p->get_field_target(current_node, field);
-
                 for (PAGNode *next_node : next_nodes)
                 {
-                    if (visited.insert(next_node).second)
+                    if (visited.find(next_node) == visited.end())
                     {
-                        const auto &pts_set = p->points_to(next_node);
-                        if (pts_set.find(target_obj) != pts_set.end())
-                        {
+                        const auto &next_objs = p->points_to(next_node);
+                        if (containsNode(next_objs, target_obj))
                             return true;
-                        }
-
+                        
+                        visited.insert(next_node);
                         queue.push(next_node);
                     }
                 }
             }
         }
-
         return false;
     }
 
@@ -428,17 +432,18 @@ public:
     {
         auto leaky_nodes = p_prime->getLeakyNodes();
 
-        PAGNode* retNode = p_prime->getReturnNode(mx);
-        if (retNode != nullptr) {
-            leaky_nodes.insert(retNode);
-        }
-
-        std::vector<PAGNode*> formalParams = p_prime->getFormalParameterNodes(mx);
-        for (PAGNode* paramNode : formalParams) {
-            if (paramNode != nullptr) {
-                leaky_nodes.insert(paramNode);
+        std::string methodName = "UNKNOWN";
+        for (auto const& pair : p_prime->_methodIndices) {
+            if (pair.second == mx) {
+                methodName = pair.first;
+                break;
             }
         }
+
+//        std::cout << "DEBUG: should_recompile called for mx=" << mx << " (" << methodName << ")"
+//                  << " old_allocated_edges.size()=" << old_allocated_edges.size() 
+//                  << " old_escaping_objects.size()=" << old_escaping_objects.size()
+//                  << " leaky_nodes.size()=" << leaky_nodes.size() << std::endl;
 
         for (PAGEdge *alloc_edge : old_allocated_edges)
         {
@@ -446,43 +451,43 @@ public:
 
             // Fast O(1) hash lookup
             bool isEscaping = old_escaping_objects.find(o) != old_escaping_objects.end();
+            // std::cout << "DEBUG: Processing alloc_edge src (methodIndex=" << o->methodIndex << ", bci=" << o->bci << "), isEscaping=" << isEscaping << std::endl;
 
             if (isEscaping)
             {
                 bool isReachable = false;
                 for (PAGNode *u : leaky_nodes)
                 {
-                    // auto start = std::chrono::high_resolution_clock::now();
                     bool isReach = REACH(o, u, p_prime);
-                    // auto end = std::chrono::high_resolution_clock::now();
-                    // auto elapsed_update = std::chrono::duration_cast<std::chrono::microseconds>(end - start);
-                    // std::cout <<D_PREFIX << "Time for method REACH-1 "<< elapsed_update.count() << " microsecs\n";
-                    // std::cout.flush();
+                    // std::cout << "DEBUG: REACH(o, u) [Escaping] returned " << isReach << std::endl;
                     isReachable |= isReach;
                     if (isReachable)
                         break; // Early exit avoids unnecessary traversals
                 }
 
-                if (!isReachable)
+                // std::cout << "DEBUG: For Escaping obj, isReachable=" << isReachable << std::endl;
+
+                if (!isReachable) {
+                    // std::cout << "DEBUG: Returning true (recompile) because obj is no longer reachable!" << std::endl;
                     return true; // Recompile mx
+                }
             }
             else
             {
                 for (PAGNode *u : leaky_nodes)
                 {
-                    // auto start = std::chrono::high_resolution_clock::now();
                     bool isReach = REACH(o, u, p_prime);
-                    // auto end = std::chrono::high_resolution_clock::now();
-                    // auto elapsed_update = std::chrono::duration_cast<std::chrono::microseconds>(end - start);
-                    // std::cout <<D_PREFIX << "Time for method REACH-2 "<< elapsed_update.count() << " microsecs\n";
-                    // std::cout.flush();
+                    // std::cout << "DEBUG: REACH(o, u) [Captured] returned " << isReach << std::endl;
                     if (isReach)
                     {
+                        // std::cout << "DEBUG: Returning true (recompile) because Captured obj became reachable!" << std::endl;
                         return true; // Recompile mx
                     }
                 }
             }
         }
+        
+        // std::cout << "DEBUG: Returning false (no recompile needed)" << std::endl;
         return false;
     }
 
@@ -700,6 +705,10 @@ public:
             }
         }
         std::string fullNAME = className + "." + name + signature;
+        if (isLibraryMethod(fullNAME) || all_loaded_classes.find(className) == all_loaded_classes.end()) {
+            return;
+        }
+
         if (analysedMethodNames.find(fullNAME) == analysedMethodNames.end())
         {
             bool static_node_created_here = false;

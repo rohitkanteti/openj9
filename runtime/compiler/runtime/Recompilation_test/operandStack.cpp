@@ -128,8 +128,8 @@ bool operandStack::merge(const operandStack &other,std::string fullNAME,int star
     {
         std::cout << "stacks not equal while analyzing " << fullNAME << " at BCI " << startBCI << std::endl;
         std::cout << "Current stack size: " << stack.size() << ", Other stack size: " << other.stack.size() << std::endl;
+        return false;
     }
-    TR_ASSERT_FATAL(stack.size() == other.stack.size(),"Merging stacks of different heights is not supported");
 
     bool changed = false;
 

@@ -1213,13 +1213,13 @@ bool testIfCanBeReUsed(TR_RelocationRuntime *reloRuntime, char *changedMethodNam
 
                if (!isShared)
                {
-                  std::cout << "[" << get_time_ms() << "][DEBUG-RELO] SUCCESS: Class [" << className
-                            << "] found in RAM (SCC Bypass Active)." << std::endl;
+                  // std::cout << "[" << get_time_ms() << "][DEBUG-RELO] SUCCESS: Class [" << className
+                  //          << "] found in RAM (SCC Bypass Active)." << std::endl;
                }
                else
                {
-                  std::cout << "[" << get_time_ms() << "][DEBUG-RELO] WARNING: Class [" << className
-                            << "] found in SCC (Stale Version). Salvage may be unsafe." << std::endl;
+                  // std::cout << "[" << get_time_ms() << "][DEBUG-RELO] WARNING: Class [" << className
+                  //          << "] found in SCC (Stale Version). Salvage may be unsafe." << std::endl;
 
                   // For SmartAOT research, you should likely return false here to prevent
                   // recompilation against the wrong bytecode version.
@@ -1247,7 +1247,7 @@ bool testIfCanBeReUsed(TR_RelocationRuntime *reloRuntime, char *changedMethodNam
             }
             else
             {
-               std::cout << "[" << get_time_ms() << "][DEBUG-RELO] FAILED: Class [" << className << "] not found in ANY loader." << std::endl;
+               // std::cout << "[" << get_time_ms() << "][DEBUG-RELO] FAILED: Class [" << className << "] not found in ANY loader." << std::endl;
                // std::cout << D_PREFIX << "  FAILED: Class [" << className << "] not found in ANY loader." << std::endl;
             }
          }
@@ -1297,10 +1297,18 @@ bool testIfCanBeReUsed(TR_RelocationRuntime *reloRuntime, char *changedMethodNam
       }
       updateMatchEdges(updated_pag);
    }
-
    bool recompile_ea = rec_test.should_recompile(mx, updated_pag, allocs, escapes);
    bool recompile_pa = rec_test.check_pa_inlining(mx, updated_pag, old_callsite_types);
    
+   if (recompile_pa)
+   {
+      std::cout << "[SmartAOT] Discarding method due to inline check failure: " << mx_methodSignature << std::endl;
+   }
+   else if (recompile_ea)
+   {
+      std::cout << "[SmartAOT] Discarding method due to escape analysis check failure: " << mx_methodSignature << std::endl;
+   }
+
    if (recompile_ea || recompile_pa)
    {
       methodIndex_to_CanItBeResused[mx] = RECOMPILE;
@@ -1754,6 +1762,8 @@ bool isSalvageableRelocationError(TR_RelocationErrorCode rc) {
         case TR_RelocationErrorCode::methodFromSingleAbstractImplValidationFailure:
         case TR_RelocationErrorCode::methodFromClassValidationFailure:
         case TR_RelocationErrorCode::methodFromClassAndSigValidationFailure:
+      //   case TR_RelocationErrorCode::instanceFieldValidationFailure:
+      //   case TR_RelocationErrorCode::staticFieldValidationFailure:
             return true;
 
         // FATAL SEGFAULT RISKS: Immediately reject method, field, or signature changes.
@@ -1797,52 +1807,42 @@ TR_RelocationRecordGroup::applyRelocations(TR_RelocationRuntime *reloRuntime,
       {
          uint8_t reloType = recordPointer->type(reloTarget);
          aotStats->numRelocationsFailedByType[reloType]++;
+         
+         TR::Options *aotOptions = TR::Options::getAOTCmdLineOptions();
+         TR::Options *jitOptions = TR::Options::getCmdLineOptions();
          TR::Compilation *comp = reloRuntime->comp();
-         char *changedMethodNamesFile = comp->getOptions()->getchangedMethodNamesFile();
-         // if(!reloRecord->isValidationRecord())
-         // {
-         //    std::cout << "DEBUG_RELO : its not a validation record, rc =" << reloRuntime->getReloErrorCodeName(rc) << std::endl;
-         // }
-         if (changedMethodNamesFile != NULL && comp->getOption(TR_smartAOTLoad) && reloRecord->isValidationRecord() && isSalvageableRelocationError(rc))
+         char *changedMethodNamesFile = aotOptions ? aotOptions->getchangedMethodNamesFile() : NULL;
+         if (changedMethodNamesFile == NULL && jitOptions != NULL)
          {
-            // auto start = std::chrono::high_resolution_clock::now();
-            bool reuse = testIfCanBeReUsed(reloRuntime, changedMethodNamesFile);
+            changedMethodNamesFile = jitOptions->getchangedMethodNamesFile();
+         }
+         if (changedMethodNamesFile == NULL && comp != NULL && comp->getOptions() != NULL)
+         {
+            changedMethodNamesFile = comp->getOptions()->getchangedMethodNamesFile();
+         }
 
-            // auto end = std::chrono::high_resolution_clock::now();
-            // auto elapsed_us = std::chrono::duration_cast<std::chrono::microseconds>(end - start);
-            // std::cout << elapsed_us.count() << " ";
-            // std::cout.flush();
+         bool isSmartAOT = (aotOptions && aotOptions->getOption(TR_smartAOTLoad)) ||
+                           (jitOptions && jitOptions->getOption(TR_smartAOTLoad)) ||
+                           (comp && comp->getOption(TR_smartAOTLoad));
+
+         // std::cout << "DEBUG_CONDITIONS are as follows:" << std::endl;
+         // std::cout << "  - rc = " << reloRuntime->getReloErrorCodeName(rc) << std::endl;
+         // std::cout << "  - changedMethodNamesFile != NULL: " << (changedMethodNamesFile ? changedMethodNamesFile : "NULL") << " (" << (changedMethodNamesFile != NULL) << ")" << std::endl;
+         // std::cout << "  - TR_smartAOTLoad: " << isSmartAOT << std::endl;
+         // std::cout << "  - isValidationRecord: " << reloRecord->isValidationRecord() << std::endl;
+         // std::cout << "  - isSalvageableRelocationError(rc): " << isSalvageableRelocationError(rc) << std::endl;
+
+
+         if (changedMethodNamesFile != NULL && isSmartAOT && reloRecord->isValidationRecord() && isSalvageableRelocationError(rc))
+         {
+            bool reuse = testIfCanBeReUsed(reloRuntime, changedMethodNamesFile);
 
             if (reuse == CAN_BE_REUSED)
             {
-               // TR_ResolvedMethod *resolvedMethod = reloRuntime->currentResolvedMethod();
-               // char *methodName = resolvedMethod->nameChars();
-               // int32_t methodNameLength = resolvedMethod->nameLength();
-               // char *methodSignature = resolvedMethod->signatureChars();
-               // int32_t methodSignatureLength = resolvedMethod->signatureLength();
-               // std::string name(methodName, methodNameLength);
-               // std::string signature(methodSignature, methodSignatureLength);
-
-               // TR_OpaqueClassBlock *clazz = resolvedMethod->classOfMethod();
-               // J9Class *j9clazz = (J9Class *)clazz;
-
-               // J9UTF8 *classNameUTF8 = J9ROMCLASS_CLASSNAME(j9clazz->romClass);
-               // char *className = (char *)J9UTF8_DATA(classNameUTF8);
-               // int32_t classNameLength = J9UTF8_LENGTH(classNameUTF8);
-
-               // std::string classNameStr(className, classNameLength);
-
-               // std::cout << "1. Need not to recompile and can be reused " << className << "." << name << signature << std::endl; //<< reloRuntime->currentResolvedMethod()->findOrCreateJittedMethodSymbol(comp)->signature(comp->trMemory()) << std::endl;
-               // return TR_RelocationErrorCode::relocationOK;
                goto OK;
             }
-            // else
-            // {
-            //    // std::cout << "Cannot be reused!!\n";
-            // }
 
             RELO_LOG(reloRuntime->reloLogger(), 6, "\tINTERNAL ERROR!\n");
-
          }
 
          return rc;

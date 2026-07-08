@@ -325,6 +325,10 @@ TR::MonitorElimination::MonitorElimination(TR::OptimizationManager *manager)
 
 int32_t TR::MonitorElimination::perform()
    {
+   // if (comp()->getOption(TR_smartAOTLoad) || comp()->getOption(TR_RunMyAnalysis))
+   //    {
+   //    printf("MonitorElimination compiling method %s, relocatable AOT: %s\n", comp()->signature(), comp()->compileRelocatableCode() ? "yes" : "no");
+   //    }
    if (comp()->getOption(TR_DisableMonitorOpts))
       {
       if (trace())

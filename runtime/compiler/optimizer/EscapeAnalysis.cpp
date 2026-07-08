@@ -232,6 +232,10 @@ bool TR_EscapeAnalysis::isImmutableObject(Candidate *candidate)
 
 int32_t TR_EscapeAnalysis::perform()
    {
+   // if (comp()->getOption(TR_smartAOTLoad) || comp()->getOption(TR_RunMyAnalysis))
+   //    {
+   //    printf("EscapeAnalysis compiling method %s, relocatable AOT: %s\n", comp()->signature(), comp()->compileRelocatableCode() ? "yes" : "no");
+   //    }
    if (comp()->isOptServer() && (comp()->getMethodHotness() <= warm))
       return 0;
 
