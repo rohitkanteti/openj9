@@ -24,6 +24,8 @@
 #include "optimizer/J9Inliner.hpp"
 
 #include <algorithm>
+#include <unordered_map>
+#include <unordered_set>
 #include "env/KnownObjectTable.hpp"
 #include "compile/OSRData.hpp"
 #include "compile/ResolvedMethod.hpp"
@@ -515,6 +517,14 @@ bool TR_InlinerBase::inlineCallTarget(TR_CallStack *callStack, TR_CallTarget *ca
        NumInlinedMethods[comp()->getMethodHotness()]++;
        InlinedSizes[comp()->getMethodHotness()] += TR::Compiler->mtd.bytecodeSize(calltarget->_calleeSymbol->getResolvedMethod()->getPersistentIdentifier());
        }
+
+   if (successful) {
+      extern std::unordered_map<std::string, std::unordered_set<std::string>> mx_to_inlined_methods_str;
+      std::string callerStr = comp()->signature();
+      std::string calleeStr = calltarget->_calleeMethod->signature(comp()->trMemory());
+      mx_to_inlined_methods_str[callerStr].insert(calleeStr);
+   }
+
    return successful;
    }
 

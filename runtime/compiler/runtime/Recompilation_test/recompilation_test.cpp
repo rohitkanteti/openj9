@@ -251,6 +251,40 @@ public:
         return false;
     }
 
+    // This method checks whether the escape status of any locked object 
+    // at any synchronization site (SyncSite) has changed between the old and new PAG.
+    // This implements the SyncSite escape status change logic.
+    bool check_sync_sites(int mx, PointerAssignmentGraph *p_prime, const std::unordered_map<std::string, bool>& old_syncSite_escapes) {
+        auto leaky_nodes = p_prime->getLeakyNodes();
+
+        for (const auto& pair : old_syncSite_escapes) {
+            const std::string& syncSiteKey = pair.first;
+            bool old_escapes = pair.second;
+
+            auto it = p_prime->CG.syncSites.find(syncSiteKey);
+            if (it == p_prime->CG.syncSites.end() || it->second.empty()) continue;
+
+            bool new_escapes = false;
+            for (PAGNode* new_var : it->second) {
+                for (PAGNode* obj : p_prime->points_to(new_var)) {
+                    for (PAGNode* u : leaky_nodes) {
+                        if (REACH(obj, u, p_prime)) {
+                            new_escapes = true;
+                            break;
+                        }
+                    }
+                    if (new_escapes) break;
+                }
+                if (new_escapes) break;
+            }
+
+            if (old_escapes != new_escapes) {
+                return true; 
+            }
+        }
+        return false;
+    }
+
     int getOrInsertMethodIndex(std::string methodName, PointerAssignmentGraph *pag)
     {
         if (pag->_methodIndices.find(methodName) != pag->_methodIndices.end())
@@ -428,68 +462,6 @@ public:
         return false;
     }
 
-    bool should_recompile(int mx, PointerAssignmentGraph *p_prime, const std::unordered_set<PAGEdge *> &old_allocated_edges, const std::unordered_set<PAGNode *> &old_escaping_objects)
-    {
-        auto leaky_nodes = p_prime->getLeakyNodes();
-
-        std::string methodName = "UNKNOWN";
-        for (auto const& pair : p_prime->_methodIndices) {
-            if (pair.second == mx) {
-                methodName = pair.first;
-                break;
-            }
-        }
-
-//        std::cout << "DEBUG: should_recompile called for mx=" << mx << " (" << methodName << ")"
-//                  << " old_allocated_edges.size()=" << old_allocated_edges.size() 
-//                  << " old_escaping_objects.size()=" << old_escaping_objects.size()
-//                  << " leaky_nodes.size()=" << leaky_nodes.size() << std::endl;
-
-        for (PAGEdge *alloc_edge : old_allocated_edges)
-        {
-            PAGNode *o = alloc_edge->src;
-
-            // Fast O(1) hash lookup
-            bool isEscaping = old_escaping_objects.find(o) != old_escaping_objects.end();
-            // std::cout << "DEBUG: Processing alloc_edge src (methodIndex=" << o->methodIndex << ", bci=" << o->bci << "), isEscaping=" << isEscaping << std::endl;
-
-            if (isEscaping)
-            {
-                bool isReachable = false;
-                for (PAGNode *u : leaky_nodes)
-                {
-                    bool isReach = REACH(o, u, p_prime);
-                    // std::cout << "DEBUG: REACH(o, u) [Escaping] returned " << isReach << std::endl;
-                    isReachable |= isReach;
-                    if (isReachable)
-                        break; // Early exit avoids unnecessary traversals
-                }
-
-                // std::cout << "DEBUG: For Escaping obj, isReachable=" << isReachable << std::endl;
-
-                if (!isReachable) {
-                    // std::cout << "DEBUG: Returning true (recompile) because obj is no longer reachable!" << std::endl;
-                    return true; // Recompile mx
-                }
-            }
-            else
-            {
-                for (PAGNode *u : leaky_nodes)
-                {
-                    bool isReach = REACH(o, u, p_prime);
-                    // std::cout << "DEBUG: REACH(o, u) [Captured] returned " << isReach << std::endl;
-                    if (isReach)
-                    {
-                        // std::cout << "DEBUG: Returning true (recompile) because Captured obj became reachable!" << std::endl;
-                        return true; // Recompile mx
-                    }
-                }
-            }
-        }
-        
-        // std::cout << "DEBUG: Returning false (no recompile needed)" << std::endl;
-        return false;
-    }
 
     bool is_reference_type(const char *signature, int argumentIndex)
     {
@@ -769,6 +741,27 @@ public:
                 variableMap[(formal_param_nodes[i]->name) - 1] = formal_param_nodes[i];
             else
                 variableMap[formal_param_nodes[i]->name] = formal_param_nodes[i]; // non-static methods, slot 0 -> this
+        }
+
+        // For synchronized methods, record an implicit SyncSite at method entry (represented by BCI -1).
+        // This ensures locks acquired implicitly via method modifiers are tracked for escape analysis.
+        if (romMethod->modifiers & J9AccSynchronized) {
+            PAGNode* lockedVar = nullptr;
+            if (romMethod->modifiers & J9AccStatic) {
+                if (class_to_staticPAGNode.find(className) != class_to_staticPAGNode.end()) {
+                    lockedVar = class_to_staticPAGNode[className];
+                } else {
+                    lockedVar = new PAGNode(VARIABLE, -1, nullptr, method_block, -1, methodIndex, className);
+                    class_to_staticPAGNode[className] = lockedVar;
+                    pag->PAG_nodes.insert(lockedVar);
+                }
+            } else {
+                lockedVar = variableMap[0]; // 'this'
+            }
+            if (lockedVar) {
+                std::string syncSiteKey = std::to_string(methodIndex) + "_-1";
+                pag->CG.syncSites[syncSiteKey].push_back(lockedVar);
+            }
         }
 
         int32_t currentIndex = 0;

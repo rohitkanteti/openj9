@@ -131,10 +131,10 @@ enum recompile_test_answers
    REUSE
 };
 bool smartAOTLoad = false;
-static unordered_map<int, unordered_set<PAGEdge *>> methodIndex_to_old_allocs;
 static unordered_map<int, unordered_set<PAGNode *>> methodIndex_to_old_escapes;
 static std::unordered_map<int, std::unordered_map<std::string, std::unordered_set<std::string>>> methodIndex_to_old_callsite_types;
-static bool old_allocs_gathered = false;
+static std::unordered_map<int, std::unordered_map<std::string, bool>> methodIndex_to_old_syncSite_escapes;
+static bool old_metadata_gathered = false;
 static std::unordered_map<int, recompile_test_answers> methodIndex_to_CanItBeResused;
 static std::unordered_set<std::string> modified_method_names;
 static std::vector<J9Method *> modified_methods;
@@ -769,9 +769,9 @@ std::map<std::string, J9Class *> findMultipleClassesAcrossLoaders(
 
 //    int mx = loaded_pag->_methodIndices[mx_methodSignature];
 
-//    if (!old_allocs_gathered)
+//    if (!old_metadata_gathered)
 //    {
-//       old_allocs_gathered = true;
+//       old_metadata_gathered = true;
 //       for (int ind = 1; ind <= (loaded_pag->_methodIndices.size()); ind++)
 //       {
 //          methodIndex_to_old_allocs[ind] = loaded_pag->getAllocEdges(ind);
@@ -1115,12 +1115,11 @@ bool testIfCanBeReUsed(TR_RelocationRuntime *reloRuntime, char *changedMethodNam
 
    int mx = loaded_pag->_methodIndices[mx_methodSignature];
 
-   if (!old_allocs_gathered)
+   if (!old_metadata_gathered)
    {
-      old_allocs_gathered = true;
+      old_metadata_gathered = true;
       for (int ind = 1; ind <= (loaded_pag->_methodIndices.size()); ind++)
       {
-         methodIndex_to_old_allocs[ind] = loaded_pag->getAllocEdges(ind);
          methodIndex_to_old_escapes[ind] = loaded_pag->getEscapingObjects(ind);
       }
       
@@ -1133,11 +1132,39 @@ bool testIfCanBeReUsed(TR_RelocationRuntime *reloRuntime, char *changedMethodNam
               }
           }
       }
+
+      for (const auto &entry : loaded_pag->CG.syncSites) {
+          if (!entry.second.empty()) {
+              int caller = 0, bci = 0;
+              if (sscanf(entry.first.c_str(), "%d_%d", &caller, &bci) == 2) {
+                  bool escapes = false;
+                  for (PAGNode* lockedVar : entry.second) {
+                      for (PAGNode* obj : loaded_pag->points_to(lockedVar)) {
+                          if (methodIndex_to_old_escapes[caller].find(obj) 
+                              != methodIndex_to_old_escapes[caller].end()) {
+                              escapes = true;
+                              break;
+                          }
+                      }
+                      if (escapes) break;
+                  }
+                  methodIndex_to_old_syncSite_escapes[caller][entry.first] = escapes;
+              }
+          }
+      }
    }
 
-   const unordered_set<PAGEdge *> &allocs = methodIndex_to_old_allocs[mx];
    const unordered_set<PAGNode *> &escapes = methodIndex_to_old_escapes[mx];
-   const std::unordered_map<std::string, std::unordered_set<std::string>> &old_callsite_types = methodIndex_to_old_callsite_types[mx];
+   std::unordered_map<std::string, std::unordered_set<std::string>> aggregate_callsites = methodIndex_to_old_callsite_types[mx];
+   for (int inlined_mx : loaded_pag->CG.inlinedMethods[mx]) {
+      aggregate_callsites.insert(methodIndex_to_old_callsite_types[inlined_mx].begin(),
+                                  methodIndex_to_old_callsite_types[inlined_mx].end());
+   }
+   std::unordered_map<std::string, bool> aggregate_syncSites = methodIndex_to_old_syncSite_escapes[mx];
+   for (int inlined_mx : loaded_pag->CG.inlinedMethods[mx]) {
+      aggregate_syncSites.insert(methodIndex_to_old_syncSite_escapes[inlined_mx].begin(),
+                                  methodIndex_to_old_syncSite_escapes[inlined_mx].end());
+   }
 
    if (!PAGupdated)
    {
@@ -1219,7 +1246,7 @@ bool testIfCanBeReUsed(TR_RelocationRuntime *reloRuntime, char *changedMethodNam
                else
                {
                   // std::cout << "[" << get_time_ms() << "][DEBUG-RELO] WARNING: Class [" << className
-                  //          << "] found in SCC (Stale Version). Salvage may be unsafe." << std::endl;
+                           // << "] found in SCC (Stale Version). Salvage may be unsafe." << std::endl;
 
                   // For SmartAOT research, you should likely return false here to prevent
                   // recompilation against the wrong bytecode version.
@@ -1297,19 +1324,19 @@ bool testIfCanBeReUsed(TR_RelocationRuntime *reloRuntime, char *changedMethodNam
       }
       updateMatchEdges(updated_pag);
    }
-   bool recompile_ea = rec_test.should_recompile(mx, updated_pag, allocs, escapes);
-   bool recompile_pa = rec_test.check_pa_inlining(mx, updated_pag, old_callsite_types);
+   bool recompile_pa = rec_test.check_pa_inlining(mx, updated_pag, aggregate_callsites);
+   bool recompile_sync = rec_test.check_sync_sites(mx, updated_pag, aggregate_syncSites);
    
-   if (recompile_pa)
+   if (recompile_sync)
+   {
+      std::cout << "[SmartAOT] Discarding method due to sync sites lock escape status change: " << mx_methodSignature << std::endl;
+   }
+   else if (recompile_pa)
    {
       std::cout << "[SmartAOT] Discarding method due to inline check failure: " << mx_methodSignature << std::endl;
    }
-   else if (recompile_ea)
-   {
-      std::cout << "[SmartAOT] Discarding method due to escape analysis check failure: " << mx_methodSignature << std::endl;
-   }
 
-   if (recompile_ea || recompile_pa)
+   if (recompile_pa || recompile_sync)
    {
       methodIndex_to_CanItBeResused[mx] = RECOMPILE;
       result_cache[mx_methodSignature] = NEED_TO_RECOMPILE;
@@ -1835,7 +1862,13 @@ TR_RelocationRecordGroup::applyRelocations(TR_RelocationRuntime *reloRuntime,
 
          if (changedMethodNamesFile != NULL && isSmartAOT && reloRecord->isValidationRecord() && isSalvageableRelocationError(rc))
          {
+            auto start = std::chrono::high_resolution_clock::now();
             bool reuse = testIfCanBeReUsed(reloRuntime, changedMethodNamesFile);
+            auto end = std::chrono::high_resolution_clock::now();
+
+            auto duration = std::chrono::duration_cast<std::chrono::microseconds>(end - start);
+
+            std::cout << "DEBUG_RELO=" << duration.count() << " ";
 
             if (reuse == CAN_BE_REUSED)
             {
