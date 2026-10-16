@@ -1089,6 +1089,12 @@ class TR_RelocationRecordValidateClass : public TR_RelocationRecordConstantPoolW
       virtual TR_RelocationErrorCode applyRelocation(TR_RelocationRuntime *reloRuntime, TR_RelocationTarget *reloTarget, uint8_t *reloLocation);
       virtual void preparePrivateData(TR_RelocationRuntime *reloRuntime, TR_RelocationTarget *reloTarget);
 
+      // SmartAOT: the class this record validates, looked up the same way applyRelocation does.
+      TR_OpaqueClassBlock *smartAOTClassBeingValidated(TR_RelocationRuntime *reloRuntime, TR_RelocationTarget *reloTarget)
+         {
+         return getClassFromCP(reloRuntime, reloTarget, (void *)computeNewConstantPool(reloRuntime, reloTarget, constantPool(reloTarget)));
+         }
+
    protected:
       virtual TR_OpaqueClassBlock *getClassFromCP(TR_RelocationRuntime *reloRuntime, TR_RelocationTarget *reloTarget, void *void_cp);
       virtual bool validateClass(TR_RelocationRuntime *reloRuntime, TR_OpaqueClassBlock *clazz, void *classChainOrRomClass);

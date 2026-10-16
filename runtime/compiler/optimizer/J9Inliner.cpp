@@ -518,12 +518,13 @@ bool TR_InlinerBase::inlineCallTarget(TR_CallStack *callStack, TR_CallTarget *ca
        InlinedSizes[comp()->getMethodHotness()] += TR::Compiler->mtd.bytecodeSize(calltarget->_calleeSymbol->getResolvedMethod()->getPersistentIdentifier());
        }
 
-   if (successful) {
-      extern std::unordered_map<std::string, std::unordered_set<std::string>> mx_to_inlined_methods_str;
-      std::string callerStr = comp()->signature();
-      std::string calleeStr = calltarget->_calleeMethod->signature(comp()->trMemory());
-      mx_to_inlined_methods_str[callerStr].insert(calleeStr);
-   }
+   extern bool smartAOTDependencyRecordingEnabled(TR::Compilation *comp);
+   if (successful && smartAOTDependencyRecordingEnabled(comp()))
+      {
+      // SmartAOT: record the callee as an inlined dependency of the method being AOT compiled
+      extern void smartAOTRecordDependency(const void *compilation, const char *caller, const char *callee, char kind);
+      smartAOTRecordDependency(comp(), comp()->signature(), calltarget->_calleeMethod->signature(comp()->trMemory()), 'I');
+      }
 
    return successful;
    }

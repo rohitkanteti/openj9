@@ -66,6 +66,8 @@
 #endif /* defined(J9VM_OPT_JITSERVER) */
 
 #include "runtime/Recompilation_test/recompilation_test.cpp"
+#include "runtime/J9VMAccess.hpp"
+#include "vmaccess.h"
 #include "../../../../omr/compiler/optimizer/loadingPAG/LoadPAG.cpp"
 #include <cstdio>
 #include <fstream>
@@ -129,10 +131,44 @@ enum recompile_test_answers
    REUSE
 };
 bool smartAOTLoad = false;
-static unordered_map<int, unordered_set<PAGEdge *>> methodIndex_to_old_allocs;
-static unordered_map<int, unordered_set<PAGNode *>> methodIndex_to_old_escapes;
+// Snapshot of the cold-run (old PAG p) analysis results, taken before the PAG is updated in place.
+static std::unordered_set<uint64_t> old_escaping_objects;                              // ESCAPE(., p)
+static std::unordered_map<int, std::unordered_set<uint64_t>> methodIndex_to_old_syncObjs; // SyncObjs(., p)
 static std::unordered_map<int, std::unordered_map<std::string, std::unordered_set<std::string>>> methodIndex_to_old_callsite_types;
-static bool old_allocs_gathered = false;
+// Methods whose bodies the cold-run analysis actually traversed (analyzedMethods.txt.gz). A method that only has a
+// method index (e.g. it was only seen as a callee) has no sync sites / call sites in the PAG to validate against.
+static std::unordered_set<std::string> cold_analysed_methods;
+static bool old_results_gathered = false;
+// Results on the updated PAG p', computed once after the incremental update.
+static std::unordered_set<uint64_t> new_escaping_objects;                              // ESCAPE(., p')
+static std::unordered_map<int, std::unordered_set<uint64_t>> methodIndex_to_new_syncObjs; // SyncObjs(., p')
+static std::unordered_set<int> changed_method_indices;
+// Methods with an instance call site whose receiver could not be resolved when loading the PAG.
+static std::unordered_set<int> methods_with_unresolved_receivers;
+// Set when the PAG could not be brought up to date with every changed method (changed class/method not found,
+// stale class version, or re-analysis failure). Validation is then impossible and every method is recompiled.
+static bool pag_update_failed = false;
+
+// Releases VM access (if held by vmThread) for the lifetime of the object, e.g. while blocking on a plain mutex or
+// sleeping, so that a GC / exclusive VM access request is not held up by this (compilation) thread.
+class SmartAOTReleaseVMAccess
+{
+public:
+   SmartAOTReleaseVMAccess(J9VMThread *vmThread)
+      : _vmThread(vmThread), _hadAccess(vmThread && (vmThread->publicFlags & J9_PUBLIC_FLAGS_VM_ACCESS))
+   {
+      if (_hadAccess)
+         releaseVMAccess(_vmThread);
+   }
+   ~SmartAOTReleaseVMAccess()
+   {
+      if (_hadAccess)
+         acquireVMAccessNoSuspend(_vmThread);
+   }
+private:
+   J9VMThread *_vmThread;
+   bool _hadAccess;
+};
 static std::unordered_map<int, recompile_test_answers> methodIndex_to_CanItBeResused;
 static std::unordered_set<std::string> modified_method_names;
 static std::vector<J9Method *> modified_methods;
@@ -609,7 +645,14 @@ bool testIfCanBeReUsed(TR_RelocationRuntime *reloRuntime, char *changedMethodNam
    recompilation_test rec_test;
    rec_test.reloRuntime = reloRuntime;
 
-   std::lock_guard<std::mutex> lock(pag_relocation_mutex);
+   J9VMThread *vmThread = comp->j9VMThread();
+   std::unique_lock<std::mutex> lock(pag_relocation_mutex, std::defer_lock);
+   if (!lock.try_lock())
+   {
+      // Do not block on the mutex while holding VM access: the holder may need a GC / exclusive access.
+      SmartAOTReleaseVMAccess noVMAccess(vmThread);
+      lock.lock();
+   }
 
    auto cache_it = result_cache.find(mx_methodSignature);
    if (cache_it != result_cache.end())
@@ -650,9 +693,18 @@ bool testIfCanBeReUsed(TR_RelocationRuntime *reloRuntime, char *changedMethodNam
       }
    }
 
+   // A validation record failed, i.e. a class this code depends on is not the one it was compiled against. Without
+   // the list of changed methods nothing can be checked, so the code must not be reused (this used to reuse it).
    if (!methods_modified || modified_method_names.empty())
    {
-      return CAN_BE_REUSED;
+      static bool reported = false;
+      if (!reported)
+      {
+         reported = true;
+         fprintf(stderr, "[SmartAOT] ERROR: changed-method list %s is missing or empty; AOT code cannot be validated\n", changedMethodNamesFile);
+      }
+      result_cache[mx_methodSignature] = NEED_TO_RECOMPILE;
+      return NEED_TO_RECOMPILE;
    }
 
    if (!loaded_pag)
@@ -662,47 +714,146 @@ bool testIfCanBeReUsed(TR_RelocationRuntime *reloRuntime, char *changedMethodNam
          startPAGLoaderThread();
          std::cout << D_PREFIX << "Started PAG loader thread from testIfCanBeReUsed as fallback." << std::endl;
       }
-      while (!pag_loading_finished.load()) {
-         j9thread_sleep(10);
+      if (!pag_loading_finished.load())
+      {
+         // The loader thread needs no VM access; do not hold up GC while waiting for it.
+         SmartAOTReleaseVMAccess noVMAccess(vmThread);
+         while (!pag_loading_finished.load()) {
+            j9thread_sleep(10);
+         }
       }
-      auto end_wait = std::chrono::steady_clock::now();
-      // auto duration_ms = std::chrono::duration_cast<std::chrono::microseconds>(end_wait - start_wait).count();
-
-      // std::cout << D_PREFIX << "Spent " << duration_ms << "ms waiting for PAG load." << std::endl;
 
       loaded_pag = global_loaded_pag;
-      TR_ASSERT_FATAL(loaded_pag, "PAG should has not been loaded by the background thread !!");
-   }
-
-   int mx = loaded_pag->_methodIndices[mx_methodSignature];
-
-   if (!old_allocs_gathered)
-   {
-      old_allocs_gathered = true;
-      for (int ind = 1; ind <= (loaded_pag->_methodIndices.size()); ind++)
+      if (!loaded_pag)
       {
-         methodIndex_to_old_allocs[ind] = loaded_pag->getAllocEdges(ind);
-         methodIndex_to_old_escapes[ind] = loaded_pag->getEscapingObjects(ind);
-      }
-      
-      for (const auto &entry : loaded_pag->CG.callsiteParams) {
-          if (!entry.second.empty()) {
-              int caller = 0, calleeMethodIndex = 0, bci = 0;
-              if (sscanf(entry.first.c_str(), "%d %d %d", &caller, &calleeMethodIndex, &bci) == 3) {
-                  PAGNode* receiver = entry.second[0];
-                  methodIndex_to_old_callsite_types[caller][entry.first] = rec_test.get_types(receiver, loaded_pag);
-              }
-          }
+         fprintf(stderr, "[SmartAOT] ERROR: the PAG could not be loaded; AOT code of affected methods cannot be validated\n");
+         pag_update_failed = true;
       }
    }
 
-   const unordered_set<PAGEdge *> &allocs = methodIndex_to_old_allocs[mx];
-   const unordered_set<PAGNode *> &escapes = methodIndex_to_old_escapes[mx];
-   const std::unordered_map<std::string, std::unordered_set<std::string>> &old_callsite_types = methodIndex_to_old_callsite_types[mx];
+   if (pag_update_failed)
+   {
+      result_cache[mx_methodSignature] = NEED_TO_RECOMPILE;
+      return NEED_TO_RECOMPILE;
+   }
+
+   auto mxIt = loaded_pag->_methodIndices.find(mx_methodSignature);
+   if (mxIt == loaded_pag->_methodIndices.end())
+   {
+      // No cold-run analysis results for mx: its optimizations cannot be validated.
+      result_cache[mx_methodSignature] = NEED_TO_RECOMPILE;
+      return NEED_TO_RECOMPILE;
+   }
+   int mx = mxIt->second;
+
+   if (!old_results_gathered)
+   {
+      old_results_gathered = true;
+      cold_analysed_methods = analysedMethodNames; // before the warm run edits the set
+      old_escaping_objects = rec_test.computeEscapingObjectKeys(loaded_pag);
+      methodIndex_to_old_syncObjs = rec_test.computeSyncObjKeysByMethod(loaded_pag);
+
+      // Receiver types of every instance call site in p (the receivers are recorded explicitly by the cold run).
+      for (const auto &entry : loaded_pag->CG.callsiteReceivers) {
+          int caller = 0, calleeMethodIndex = 0, bci = 0;
+          if (!entry.second.empty() && sscanf(entry.first.c_str(), "%d %d %d", &caller, &calleeMethodIndex, &bci) == 3)
+              methodIndex_to_old_callsite_types[caller][entry.first] = rec_test.get_types(entry.second, loaded_pag);
+      }
+
+      // The loader only puts instance call sites in this set.
+      for (const std::string &key : loaded_pag->CG.unresolvedReceiverCallsites) {
+          int caller = 0, calleeMethodIndex = 0, bci = 0;
+          if (sscanf(key.c_str(), "%d %d %d", &caller, &calleeMethodIndex, &bci) == 3)
+              methods_with_unresolved_receivers.insert(caller);
+      }
+   }
+
+   // Structural check (paper Sec. 4): if mx itself or a method inlined into mx changed, the compiled code
+   // embeds the old bytecode and cannot be reused.
+   // Code inlined from any method of a changed class is invalid too, even if that method is unchanged: the class was
+   // regenerated, and its constant pool can be reordered (observed for Soot output), while inlined code refers to
+   // the inlinee's constant pool by index.
+   static std::unordered_set<std::string> changed_class_names;
+   if (changed_class_names.empty())
+   {
+      for (const std::string &changedName : modified_method_names)
+      {
+         size_t dot = changedName.find('.');
+         if (dot != std::string::npos)
+            changed_class_names.insert(changedName.substr(0, dot));
+      }
+   }
+   bool structurally_invalid = modified_method_names.count(mx_methodSignature) > 0;
+   auto inlinedNamesIt = loaded_pag->CG.inlinedMethodNames.find(mx_methodSignature);
+   if (!structurally_invalid && inlinedNamesIt != loaded_pag->CG.inlinedMethodNames.end())
+   {
+      for (const std::string &inlinedName : inlinedNamesIt->second)
+      {
+         size_t dot = inlinedName.find('.');
+         if (modified_method_names.count(inlinedName) ||
+             (dot != std::string::npos && changed_class_names.count(inlinedName.substr(0, dot))))
+         {
+            structurally_invalid = true;
+            break;
+         }
+      }
+   }
+   if (structurally_invalid)
+   {
+      static std::atomic<int> structural_fails(0);
+      structural_fails++;
+      fprintf(stderr, "[SmartAOT] Discarding method due to structural change (method or inlined callee modified): %s (Total Structural Fails: %d)\n", mx_methodSignature.c_str(), (int)structural_fails);
+      methodIndex_to_CanItBeResused[mx] = RECOMPILE;
+      result_cache[mx_methodSignature] = NEED_TO_RECOMPILE;
+      return NEED_TO_RECOMPILE;
+   }
+
+   // mx and its (non-library) dependencies must have been analysed in the cold run; otherwise the analysis results
+   // the OptChecks compare against do not exist, and a check would pass vacuously.
+   {
+      std::string unanalysed;
+      if (!cold_analysed_methods.count(mx_methodSignature))
+         unanalysed = mx_methodSignature;
+      auto depNamesIt = loaded_pag->CG.dependencyNames.find(mx_methodSignature);
+      if (unanalysed.empty() && depNamesIt != loaded_pag->CG.dependencyNames.end())
+      {
+         for (const std::string &depName : depNamesIt->second)
+         {
+            if (!isLibraryMethod(depName) && !cold_analysed_methods.count(depName))
+            {
+               unanalysed = depName;
+               break;
+            }
+         }
+      }
+      if (!unanalysed.empty())
+      {
+         static std::atomic<int> unanalysed_fails(0);
+         unanalysed_fails++;
+         fprintf(stderr, "[SmartAOT] Discarding method because %s was not analysed in the cold run: %s (Total Unanalysed Fails: %d)\n", unanalysed.c_str(), mx_methodSignature.c_str(), (int)unanalysed_fails);
+         methodIndex_to_CanItBeResused[mx] = RECOMPILE;
+         result_cache[mx_methodSignature] = NEED_TO_RECOMPILE;
+         return NEED_TO_RECOMPILE;
+      }
+   }
+
+   // Dependency set {mx} U deps(mx): methods inlined into or peeked into while compiling mx (cold run).
+   std::unordered_set<int> depSet;
+   depSet.insert(mx);
+   auto inlinedIt = loaded_pag->CG.inlinedMethods.find(mx);
+   if (inlinedIt != loaded_pag->CG.inlinedMethods.end())
+      depSet.insert(inlinedIt->second.begin(), inlinedIt->second.end());
+   auto peekedIt = loaded_pag->CG.peekedMethods.find(mx);
+   if (peekedIt != loaded_pag->CG.peekedMethods.end())
+      depSet.insert(peekedIt->second.begin(), peekedIt->second.end());
 
    if (!PAGupdated)
    {
       PAGupdated = true;
+      // Treat the PAG as unusable until the update has completed: if anything below throws (the exception is caught
+      // by the relocation runtime), later calls must not validate against a partially updated PAG.
+      pag_update_failed = true;
+      bool update_failed = false;
       updated_pag = loaded_pag;
 
       TR::Compilation *comp = reloRuntime->comp();
@@ -770,7 +921,9 @@ bool testIfCanBeReUsed(TR_RelocationRuntime *reloRuntime, char *changedMethodNam
             {
                J9Class *targetClass2 = (J9Class *)classBlock;
 
-               bool isShared = (targetClass2->classFlags & J9CLASSLOADER_SHARED_CLASSES_ENABLED);
+               // J9CLASSLOADER_SHARED_CLASSES_ENABLED is a class *loader* flag (on J9Class::classFlags the same bit
+               // means J9ClassContainsJittedMethods).
+               bool isShared = targetClass2->classLoader && (targetClass2->classLoader->flags & J9CLASSLOADER_SHARED_CLASSES_ENABLED);
 
                if (!isShared)
                {
@@ -784,7 +937,12 @@ bool testIfCanBeReUsed(TR_RelocationRuntime *reloRuntime, char *changedMethodNam
 
                   // For SmartAOT research, you should likely return false here to prevent
                   // recompilation against the wrong bytecode version.
-                  return NEED_TO_RECOMPILE;
+                  // A sharing-enabled loader also loads (and stores) fresh class versions, so this cannot tell a stale
+                  // version from the modified one; only report it. (It must not return here either: that would leave
+                  // the one-time PAG update half done.)
+                  static std::unordered_set<std::string> reported;
+                  if (reported.insert(className).second)
+                     fprintf(stderr, "[SmartAOT] note: changed class %s was loaded by a shared-classes-enabled loader\n", className.c_str());
                }
                J9Class *targetClass = (J9Class *)classBlock;
                J9ROMClass *romClass = targetClass->romClass;
@@ -811,6 +969,14 @@ bool testIfCanBeReUsed(TR_RelocationRuntime *reloRuntime, char *changedMethodNam
                // std::cout << "[" << get_time_ms() << "][DEBUG-RELO] FAILED: Class [" << className << "] not found in ANY loader." << std::endl;
                // std::cout << D_PREFIX << "  FAILED: Class [" << className << "] not found in ANY loader." << std::endl;
             }
+         }
+
+         if (!modifed_method)
+         {
+            // The new body cannot be analysed, so the PAG would keep the stale one.
+            fprintf(stderr, "[SmartAOT] ERROR: changed method %s not found; AOT code cannot be validated\n", changedMethodName.c_str());
+            update_failed = true;
+            continue;
          }
 
          if (modifed_method)
@@ -852,14 +1018,32 @@ bool testIfCanBeReUsed(TR_RelocationRuntime *reloRuntime, char *changedMethodNam
                my = loaded_pag->_methodIndices[my_methodSignature];
             }
 
+            changed_method_indices.insert(my);
+
             // Update PAG using the fresh method pointer and constant pool
-            updated_pag = rec_test.update_PAG(updated_pag, my, modifed_method, &(updated_pag->CG), my_methodSignature);
+            if (!rec_test.update_PAG(updated_pag, my, modifed_method, &(updated_pag->CG), my_methodSignature))
+            {
+               fprintf(stderr, "[SmartAOT] ERROR: could not re-analyse changed method %s; AOT code cannot be validated\n", my_methodSignature.c_str());
+               update_failed = true;
+            }
          }
       }
       updateMatchEdges(updated_pag);
+      new_escaping_objects = rec_test.computeEscapingObjectKeys(updated_pag);
+      methodIndex_to_new_syncObjs = rec_test.computeSyncObjKeysByMethod(updated_pag);
+      // Only now is the updated PAG complete.
+      pag_update_failed = update_failed;
    }
-   bool recompile_ea = rec_test.should_recompile(mx, updated_pag, allocs, escapes);
-   bool recompile_pa = rec_test.check_pa_inlining(mx, updated_pag, old_callsite_types);
+
+   if (pag_update_failed)
+   {
+      methodIndex_to_CanItBeResused[mx] = RECOMPILE;
+      result_cache[mx_methodSignature] = NEED_TO_RECOMPILE;
+      return NEED_TO_RECOMPILE;
+   }
+
+   bool recompile_ea = rec_test.check_lock_elision(depSet, changed_method_indices, methodIndex_to_old_syncObjs, methodIndex_to_new_syncObjs, old_escaping_objects, new_escaping_objects);
+   bool recompile_pa = rec_test.check_pa_inlining(depSet, changed_method_indices, updated_pag, methodIndex_to_old_callsite_types, methods_with_unresolved_receivers);
    
    fprintf(stderr, "recompile_ea=%s\n", recompile_ea ? "true" : "false");
    fprintf(stderr, "recompile_pa=%s\n", recompile_pa ? "true" : "false");
@@ -884,6 +1068,12 @@ bool testIfCanBeReUsed(TR_RelocationRuntime *reloRuntime, char *changedMethodNam
       methodIndex_to_CanItBeResused[mx] = RECOMPILE;
       result_cache[mx_methodSignature] = NEED_TO_RECOMPILE;
       return NEED_TO_RECOMPILE;
+   }
+
+   {
+      static std::atomic<int> reused(0);
+      reused++;
+      fprintf(stderr, "[SmartAOT] Reusing method, all OptChecks passed (inline + lock elision): %s (Total Reused: %d)\n", mx_methodSignature.c_str(), (int)reused);
    }
 
    methodIndex_to_CanItBeResused[mx] = REUSE;
@@ -1325,13 +1515,11 @@ bool isSalvageableRelocationError(TR_RelocationErrorCode rc) {
         case TR_RelocationErrorCode::classByNameValidationFailure:
         case TR_RelocationErrorCode::arbitraryClassValidationFailure:
         case TR_RelocationErrorCode::systemClassByNameValidationFailure:
-        case TR_RelocationErrorCode::virtualMethodFromCPValidationFailure:
-        case TR_RelocationErrorCode::virtualMethodFromOffsetValidationFailure:
-        case TR_RelocationErrorCode::methodFromSingleImplValidationFailure:
-        case TR_RelocationErrorCode::methodFromSingleInterfaceImplValidationFailure:
-        case TR_RelocationErrorCode::methodFromSingleAbstractImplValidationFailure:
-        case TR_RelocationErrorCode::methodFromClassValidationFailure:
-        case TR_RelocationErrorCode::methodFromClassAndSigValidationFailure:
+        // Method-identity failures are structural, not optimization-resilience failures, and are rejected:
+        //  - virtualMethodFromOffset: the vtable slot baked into the code now holds a different method;
+        //  - methodFromSingle*Impl: the single-implementer assumption behind a devirtualized/inlined call changed;
+        //  - methodFromClass / methodFromClassAndSig / virtualMethodFromCP: the method ID was bound to a different
+        //    method (or left unbound), and later relocation records that use the ID would be wrong.
       //   case TR_RelocationErrorCode::instanceFieldValidationFailure:
       //   case TR_RelocationErrorCode::staticFieldValidationFailure:
             return true;
@@ -1341,6 +1529,174 @@ bool isSalvageableRelocationError(TR_RelocationErrorCode rc) {
         default:
             return false;
     }
+}
+
+// SmartAOT layout check. A salvageable validation failure means that a class the compiled code depends on (or one of
+// its superclasses or interfaces) is a different class version than the one the code was compiled against. The code
+// embeds that class's layout -- instance field offsets, vtable slots (method order), the class hierarchy -- so it may
+// only be reused if the layout is unchanged; method bodies may differ, which is what the OptChecks then validate.
+// The old versions are the ROM classes recorded in the class chain of the failed record.
+static bool smartAOTSameUTF8(J9UTF8 *a, J9UTF8 *b)
+{
+   if (a == b)
+      return true;
+   if (!a || !b)
+      return false;
+   return J9UTF8_LENGTH(a) == J9UTF8_LENGTH(b) && memcmp(J9UTF8_DATA(a), J9UTF8_DATA(b), J9UTF8_LENGTH(a)) == 0;
+}
+
+static bool smartAOTSameROMClassLayout(J9ROMClass *oldROM, J9ROMClass *newROM)
+{
+   if (oldROM == newROM)
+      return true;
+   if (!oldROM || !newROM)
+      return false;
+   if (!smartAOTSameUTF8(J9ROMCLASS_CLASSNAME(oldROM), J9ROMCLASS_CLASSNAME(newROM)) ||
+       !smartAOTSameUTF8(J9ROMCLASS_SUPERCLASSNAME(oldROM), J9ROMCLASS_SUPERCLASSNAME(newROM)))
+      return false;
+
+   if (oldROM->interfaceCount != newROM->interfaceCount)
+      return false;
+   J9SRP *oldInterfaces = J9ROMCLASS_INTERFACES(oldROM);
+   J9SRP *newInterfaces = J9ROMCLASS_INTERFACES(newROM);
+   for (U_32 i = 0; i < oldROM->interfaceCount; i++)
+   {
+      if (!smartAOTSameUTF8(NNSRP_PTR_GET(&oldInterfaces[i], J9UTF8 *), NNSRP_PTR_GET(&newInterfaces[i], J9UTF8 *)))
+         return false;
+   }
+
+   // Fields, in declaration order (instance field offsets are derived from it).
+   if (oldROM->romFieldCount != newROM->romFieldCount)
+      return false;
+   J9ROMFieldWalkState oldFieldWalk, newFieldWalk;
+   J9ROMFieldShape *oldField = romFieldsStartDo(oldROM, &oldFieldWalk);
+   J9ROMFieldShape *newField = romFieldsStartDo(newROM, &newFieldWalk);
+   while (oldField && newField)
+   {
+      if ((oldField->modifiers & J9AccStatic) != (newField->modifiers & J9AccStatic) ||
+          !smartAOTSameUTF8(J9ROMFIELDSHAPE_NAME(oldField), J9ROMFIELDSHAPE_NAME(newField)) ||
+          !smartAOTSameUTF8(J9ROMFIELDSHAPE_SIGNATURE(oldField), J9ROMFIELDSHAPE_SIGNATURE(newField)))
+         return false;
+      oldField = romFieldsNextDo(&oldFieldWalk);
+      newField = romFieldsNextDo(&newFieldWalk);
+   }
+   if (oldField || newField)
+      return false;
+
+   // Methods, in order (vtable slots and method indices are derived from it). Bodies may differ.
+   if (oldROM->romMethodCount != newROM->romMethodCount)
+      return false;
+   J9ROMMethod *oldMethod = J9ROMCLASS_ROMMETHODS(oldROM);
+   J9ROMMethod *newMethod = J9ROMCLASS_ROMMETHODS(newROM);
+   for (U_32 i = 0; i < oldROM->romMethodCount; i++)
+   {
+      if ((oldMethod->modifiers & 0xFFFF) != (newMethod->modifiers & 0xFFFF) ||
+          !smartAOTSameUTF8(J9ROMMETHOD_NAME(oldMethod), J9ROMMETHOD_NAME(newMethod)) ||
+          !smartAOTSameUTF8(J9ROMMETHOD_SIGNATURE(oldMethod), J9ROMMETHOD_SIGNATURE(newMethod)))
+         return false;
+      oldMethod = nextROMMethod(oldMethod);
+      newMethod = nextROMMethod(newMethod);
+   }
+   return true;
+}
+
+// Walks the class chain in the order TR_J9SharedCache::fillInClassChain writes it: the class, its superclasses
+// (root first), then its interfaces in iTable order. Returns false only for an actual difference; when there is
+// nothing to compare against (class not loaded, no chain) it returns true and sets *notChecked, so the method falls
+// back to the OptChecks alone.
+static bool smartAOTClassChainLayoutUnchanged(TR_J9SharedCache *sharedCache, TR_OpaqueClassBlock *clazz, uintptr_t *classChain, const char **notChecked)
+{
+   if (!clazz || !classChain)
+   {
+      *notChecked = clazz ? "no class chain" : "class not loaded";
+      return true;
+   }
+   UDATA *chainPtr = (UDATA *)classChain;
+   UDATA chainLength = *chainPtr++;
+   UDATA *chainEnd = (UDATA *)(((U_8 *)classChain) + chainLength);
+   auto nextOldROMClass = [&]() -> J9ROMClass *
+   {
+      if (chainPtr >= chainEnd)
+         return NULL;
+      return sharedCache->romClassFromOffsetInSharedCache(*chainPtr++);
+   };
+
+   if (!smartAOTSameROMClassLayout(nextOldROMClass(), TR::Compiler->cls.romClassOf(clazz)))
+      return false;
+   int32_t depth = TR::Compiler->cls.classDepthOf(clazz);
+   for (int32_t i = 0; i < depth; i++)
+   {
+      if (!smartAOTSameROMClassLayout(nextOldROMClass(), TR::Compiler->cls.romClassOfSuperClass(clazz, i)))
+         return false;
+   }
+   for (J9ITable *element = TR::Compiler->cls.iTableOf(clazz); element; element = TR::Compiler->cls.iTableNext(element))
+   {
+      if (!smartAOTSameROMClassLayout(nextOldROMClass(), TR::Compiler->cls.iTableRomClass(element)))
+         return false;
+   }
+   return chainPtr == chainEnd;
+}
+
+// Finds the class a failed salvageable validation record refers to and checks that its layout is unchanged. Returns
+// false only if an actual layout difference was found; if the class cannot be found, *notChecked says why.
+static bool smartAOTFailedClassLayoutUnchanged(TR_RelocationRuntime *reloRuntime, TR_RelocationTarget *reloTarget, TR_RelocationRecord *reloRecord, uint8_t reloType, const char **notChecked)
+{
+   TR_J9VMBase *fej9 = reloRuntime->fej9();
+   TR_J9SharedCache *sharedCache = fej9->sharedCache();
+   switch (reloType)
+   {
+   case TR_ValidateClassByName:
+   {
+      TR_RelocationRecordValidateClassByName *record = static_cast<TR_RelocationRecordValidateClassByName *>(reloRecord);
+      uintptr_t *classChain = (uintptr_t *)sharedCache->pointerFromOffsetInSharedCache(record->classChainOffset(reloTarget));
+      J9Class *beholder = reloRuntime->comp()->getSymbolValidationManager()->getJ9ClassFromID(record->beholderID(reloTarget));
+      J9UTF8 *className = J9ROMCLASS_CLASSNAME(sharedCache->startingROMClassOfClassChain(classChain));
+      TR::VMAccessCriticalSection layoutCheck(fej9);
+      // Same lookup as SymbolValidationManager::validateClassByNameRecord (its front end is a TR_J9VM as well).
+      TR_OpaqueClassBlock *clazz = ((TR_J9VM *)fej9)->getClassFromSignature((const char *)J9UTF8_DATA(className), (int32_t)J9UTF8_LENGTH(className), J9_CP_FROM_CLASS(beholder));
+      return smartAOTClassChainLayoutUnchanged(sharedCache, clazz, classChain, notChecked);
+   }
+   case TR_ValidateSystemClassByName:
+   {
+      TR_RelocationRecordValidateSystemClassByName *record = static_cast<TR_RelocationRecordValidateSystemClassByName *>(reloRecord);
+      uintptr_t *classChain = (uintptr_t *)sharedCache->pointerFromOffsetInSharedCache(record->classChainOffset(reloTarget));
+      J9UTF8 *className = J9ROMCLASS_CLASSNAME(sharedCache->startingROMClassOfClassChain(classChain));
+      TR::VMAccessCriticalSection layoutCheck(fej9);
+      TR_OpaqueClassBlock *clazz = fej9->getSystemClassFromClassName((const char *)J9UTF8_DATA(className), (int32_t)J9UTF8_LENGTH(className));
+      return smartAOTClassChainLayoutUnchanged(sharedCache, clazz, classChain, notChecked);
+   }
+   case TR_ValidateClass:
+   {
+      TR_RelocationRecordValidateClass *record = static_cast<TR_RelocationRecordValidateClass *>(reloRecord);
+      uintptr_t *classChain = (uintptr_t *)sharedCache->pointerFromOffsetInSharedCache(record->classChainOffsetInSharedCache(reloTarget));
+      TR_OpaqueClassBlock *clazz = record->smartAOTClassBeingValidated(reloRuntime, reloTarget);
+      TR::VMAccessCriticalSection layoutCheck(fej9);
+      return smartAOTClassChainLayoutUnchanged(sharedCache, clazz, classChain, notChecked);
+   }
+   case TR_ValidateArbitraryClass:
+   {
+      // This record fails if the loader is unknown, if the class is not loaded, or if the loaded class does not
+      // match the class chain (TR_J9SharedCache::lookupClassFromChainAndLoader). Only the last case has a layout
+      // to compare.
+      TR_RelocationRecordValidateArbitraryClass *record = static_cast<TR_RelocationRecordValidateArbitraryClass *>(reloRecord);
+      void *classChainIdentifyingLoader = sharedCache->pointerFromOffsetInSharedCache(record->classChainIdentifyingLoaderOffset(reloTarget));
+      J9ClassLoader *classLoader = (J9ClassLoader *)sharedCache->lookupClassLoaderAssociatedWithClassChain(classChainIdentifyingLoader);
+      if (!classLoader)
+      {
+         *notChecked = "class loader not found";
+         return true;
+      }
+      uintptr_t *classChain = (uintptr_t *)sharedCache->pointerFromOffsetInSharedCache(record->classChainOffsetForClassBeingValidated(reloTarget));
+      J9UTF8 *className = J9ROMCLASS_CLASSNAME(sharedCache->startingROMClassOfClassChain(classChain));
+      TR::VMAccessCriticalSection layoutCheck(fej9);
+      J9Class *clazz = jitGetClassInClassloaderFromUTF8(fej9->getCurrentVMThread(), classLoader,
+                                                        (char *)J9UTF8_DATA(className), J9UTF8_LENGTH(className));
+      return smartAOTClassChainLayoutUnchanged(sharedCache, (TR_OpaqueClassBlock *)clazz, classChain, notChecked);
+   }
+   default:
+      *notChecked = "unsupported record type";
+      return true;
+   }
 }
 TR_RelocationErrorCode
 TR_RelocationRecordGroup::applyRelocations(TR_RelocationRuntime *reloRuntime,
@@ -1405,13 +1761,34 @@ TR_RelocationRecordGroup::applyRelocations(TR_RelocationRuntime *reloRuntime,
 
          if (changedMethodNamesFile != NULL && isSmartAOT && reloRecord->isValidationRecord() && isSalvageableRelocationError(rc))
          {
-            // auto start = std::chrono::high_resolution_clock::now();
-            bool reuse = testIfCanBeReUsed(reloRuntime, changedMethodNamesFile);
-            // auto end = std::chrono::high_resolution_clock::now();
-            // auto duration = std::chrono::duration_cast<std::chrono::microseconds>(end - start);
-            
-            // printf("ValidationCost: %llu\n", (unsigned long long)duration.count());
-            // fflush(stdout);
+            auto start = std::chrono::high_resolution_clock::now();
+            // The OptChecks only validate the optimizations; first make sure the class whose validation failed still
+            // has the layout the code was compiled against.
+            const char *layoutNotChecked = NULL;
+            bool layoutUnchanged = smartAOTFailedClassLayoutUnchanged(reloRuntime, reloTarget, reloRecord, reloType, &layoutNotChecked);
+            if (layoutNotChecked)
+            {
+               static std::atomic<int> layout_unchecked(0);
+               layout_unchecked++;
+               fprintf(stderr, "[SmartAOT] Layout not checked (relo type %d, %s): %s (Total Unchecked: %d)\n",
+                       (int)reloType, layoutNotChecked, reloRuntime->currentResolvedMethod()->signature(reloRuntime->comp()->trMemory()), (int)layout_unchecked);
+            }
+            if (!layoutUnchanged)
+            {
+               static std::atomic<int> layout_fails(0);
+               layout_fails++;
+               fprintf(stderr, "[SmartAOT] Discarding method because the layout of a class it depends on changed (relo type %d): %s (Total Layout Fails: %d)\n",
+                       (int)reloType, reloRuntime->currentResolvedMethod()->signature(reloRuntime->comp()->trMemory()), (int)layout_fails);
+            }
+            bool reuse = layoutUnchanged ? testIfCanBeReUsed(reloRuntime, changedMethodNamesFile) : NEED_TO_RECOMPILE;
+            auto end = std::chrono::high_resolution_clock::now();
+            auto duration = std::chrono::duration_cast<std::chrono::microseconds>(end - start);
+
+            // Per validation-record call; the first call also includes waiting for the PAG load and the one-time PAG update,
+            // later calls for the same method hit result_cache.
+            fprintf(stderr, "[SmartAOT] ValidationCost: %llu us, result=%s, method=%s\n", (unsigned long long)duration.count(),
+                    reuse == CAN_BE_REUSED ? "REUSE" : "RECOMPILE",
+                    reloRuntime->currentResolvedMethod()->signature(reloRuntime->comp()->trMemory()));
 
             if (reuse == CAN_BE_REUSED)
             {

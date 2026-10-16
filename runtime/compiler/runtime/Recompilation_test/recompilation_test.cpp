@@ -40,6 +40,7 @@ extern int32_t getInstructionLength(TR_J9ByteCode bytecode, uint8_t *pc);
 extern int32_t branchTarget(int32_t pcIndex, TR_J9ByteCode bc, uint8_t *pc);
 extern vector<int> switchTargets(int32_t pcIndex, TR_J9ByteCode bc, uint8_t *pc);
 extern bool isReturnOrThrow(TR_J9ByteCode bc);
+extern std::vector<int32_t> smartAOTExceptionHandlerPCs(J9Method *method);
 extern bool isBranch(TR_J9ByteCode bc);
 extern bool isSwitch(TR_J9ByteCode bc);
 extern void executeBytecode(TR_J9ByteCode bytecode, uint8_t *pc, PointerAssignmentGraph *pag, operandStack *stack, TR_ResolvedMethod *resolvedMethod,
@@ -53,6 +54,8 @@ static unordered_set<std::string> threadExtendingClasses;
 static std::unordered_map<std::string, std::unordered_set<std::string>> className_to_fields;
 extern void getResolvedReflectiveCalls();
 static std::unordered_map<std::string, PAGNode *> class_to_staticPAGNode;
+extern void smartAOTSeedStaticNodes(PointerAssignmentGraph *p);
+extern bool smartAOTLoadThreadRelatedClasses();
 struct CallInfo
 {
     std::string callee;
@@ -135,6 +138,13 @@ CFG *buildCFG(TR_OpaqueMethodBlock *method_block, TR::Compilation *comp, std::ma
         pcIndex += len;
     }
 
+    // SmartAOT: exception handler entries (same as the cold-run analysis).
+    for (int32_t handlerPC : smartAOTExceptionHandlerPCs((J9Method *)method_block))
+    {
+        if (handlerPC >= 0 && handlerPC < methodSize)
+            leaders.insert(handlerPC);
+    }
+
     int blockID = 0;
     for (int32_t leader : leaders)
     {
@@ -213,12 +223,18 @@ class recompilation_test
 public:
     TR_RelocationRuntime *reloRuntime;
 
+    // Receiver types of an abstract object. The allocated class of an object is kept in pointee_class_names (set at
+    // the allocation site, and by the PAG loader from the node file); comp_type, class_name and static_type are not set
+    // for loaded objects (static_type defaults to "no static type"), so using only those gave every receiver the same
+    // type set and the inlining check could never fail.
     std::unordered_set<std::string> get_types(PAGNode* v, PointerAssignmentGraph *p) {
         std::unordered_set<std::string> types;
         for (PAGNode* obj : p->points_to(v)) {
-            if (obj->type == NEW) {
+            if (obj->type == OBJECT) {
                 if (!obj->comp_type.empty() && obj->comp_type != "type1" && obj->comp_type != "COMP_TYPE_2") {
                     types.insert(obj->comp_type);
+                } else if (!obj->pointee_class_names.empty()) {
+                    types.insert(obj->pointee_class_names.begin(), obj->pointee_class_names.end());
                 } else if (!obj->class_name.empty()) {
                     types.insert(obj->class_name);
                 } else if (!obj->static_type.empty()) {
@@ -229,23 +245,68 @@ public:
         return types;
     }
 
-    bool check_pa_inlining(int mx, PointerAssignmentGraph *p_prime, const std::unordered_map<std::string, std::unordered_set<std::string>>& old_callsite_types) {
-        for (const auto& pair : old_callsite_types) {
-            const std::string& callsite_key = pair.first;
-            const std::unordered_set<std::string>& old_types = pair.second;
-            
-            auto it = p_prime->CG.callsiteParams.find(callsite_key);
-            if (it == p_prime->CG.callsiteParams.end() || it->second.empty()) continue;
-            PAGNode* receiver = it->second[0];
-            
-            std::unordered_set<std::string> new_types = get_types(receiver, p_prime);
-            
-            if (old_types.size() == 1 && (new_types.size() > 1 || old_types != new_types)) {
-                return true; 
-            }
-            
-            if (old_types.size() > 1 && new_types.size() == 1) {
-                return true; 
+    std::unordered_set<std::string> get_types(const std::vector<PAGNode*> &vs, PointerAssignmentGraph *p) {
+        std::unordered_set<std::string> types;
+        for (PAGNode *v : vs) {
+            std::unordered_set<std::string> t = get_types(v, p);
+            types.insert(t.begin(), t.end());
+        }
+        return types;
+    }
+
+    // A call site "caller callee bci" has a receiver iff the callee is an instance method, i.e. its first formal
+    // parameter node is 'this' (slot 0; parameters of static methods start at slot 1, see getSlotForArgument).
+    // If the callee's formals are unknown, the call is treated as an instance call (conservative).
+    bool callsiteHasReceiver(const std::string &callsite_key, PointerAssignmentGraph *p)
+    {
+        int caller = 0, callee = 0, bci = 0;
+        if (sscanf(callsite_key.c_str(), "%d %d %d", &caller, &callee, &bci) != 3)
+            return false;
+        auto it = p->methodIndex_to_formalNodes.find(callee);
+        if (it == p->methodIndex_to_formalNodes.end() || it->second.empty())
+            return true;
+        return it->second[0]->name == 0;
+    }
+
+    // OptCheck for function inlining (paper Sec. 3.5). Fails if, for some my in {mx} U deps(mx), a call site of my
+    //   (1) was monomorphic in p and its receiver type set changed in p'   (Monomorphic-to-Polymorphic, safety), or
+    //   (2) was polymorphic in p and became monomorphic in p'               (Polymorphic-to-Monomorphic, missed opportunity).
+    // Methods in changedSet are skipped: a changed inlined method already fails the structural check, and the call
+    // sites of a changed peeked method are not part of mx's compiled body.
+    // It also fails if my has an instance call site whose receiver could not be resolved when loading the PAG
+    // (methodsWithUnresolvedReceivers), since its receiver types are unknown.
+    bool check_pa_inlining(const std::unordered_set<int> &depSet, const std::unordered_set<int> &changedSet, PointerAssignmentGraph *p_prime,
+                           const std::unordered_map<int, std::unordered_map<std::string, std::unordered_set<std::string>>> &old_callsite_types,
+                           const std::unordered_set<int> &methodsWithUnresolvedReceivers)
+    {
+        for (int my : depSet)
+        {
+            if (changedSet.count(my))
+                continue;
+            if (methodsWithUnresolvedReceivers.count(my))
+                return true;
+            auto myIt = old_callsite_types.find(my);
+            if (myIt == old_callsite_types.end())
+                continue;
+
+            for (const auto &pair : myIt->second)
+            {
+                const std::string &callsite_key = pair.first;
+                const std::unordered_set<std::string> &old_types = pair.second;
+
+                // my is unchanged, so its call sites are still in p'. A missing entry would mean its receiver is
+                // no longer known: do not skip the check silently.
+                auto it = p_prime->CG.callsiteReceivers.find(callsite_key);
+                if (it == p_prime->CG.callsiteReceivers.end() || it->second.empty())
+                    return true;
+
+                std::unordered_set<std::string> new_types = get_types(it->second, p_prime);
+
+                if (old_types.size() == 1 && old_types != new_types)
+                    return true;
+
+                if (old_types.size() > 1 && new_types.size() == 1)
+                    return true;
             }
         }
         return false;
@@ -263,49 +324,58 @@ public:
         return index;
     }
 
-    PointerAssignmentGraph *update_PAG(PointerAssignmentGraph *p, int my, J9Method *my_prime_J9Method, CallGraph *CG, string my_full_name)
+    // Incrementally replaces the PAG part of method my with the one of its new body my_prime_J9Method.
+    // Returns false if the new body could not be analysed; the PAG must then be considered unusable.
+    bool update_PAG(PointerAssignmentGraph *p, int my, J9Method *my_prime_J9Method, CallGraph *CG, string my_full_name)
     {
-        // auto start = std::chrono::high_resolution_clock::now();
         if (all_loaded_classes.empty())
         {
             getall_loaded_classes(reloRuntime->comp());
         }
-        // auto end = std::chrono::high_resolution_clock::now();
-        // auto duration = std::chrono::duration_cast<std::chrono::microseconds>(end - start).count();
-        // std::cout << D_PREFIX << "Time taken to get all loaded classes in update_PAG: " << duration << "  microseconds\n" << std::endl;
-        // std::cout.flush();
 
-        // start = std::chrono::high_resolution_clock::now();
         if (!threadClassesIdentified)
         {
             threadClassesIdentified = true;
             getResolvedReflectiveCalls();
-            std::ifstream inFile("threadRelatedClasses.txt");
-            std::string line;
-
-            if (inFile.is_open())
-            {
-                threadExtendingClasses.clear();
-                while (std::getline(inFile, line))
-                {
-                    if (!line.empty())
-                    {
-                        threadExtendingClasses.insert(line);
-                    }
-                }
-                inFile.close();
-            }
-            else
-            {
-                TR_ASSERT_FATAL(1, "could not open the file threadRelatedClasses.txt");
-            }
+            // Fill the thread-class set that the analysis (executeBytecode) actually uses.
+            // If the cold run did not write the file, its set was empty too, and the warm run keeps it empty.
+            if (!smartAOTLoadThreadRelatedClasses())
+                fprintf(stderr, "[SmartAOT] note: threadRelatedClasses.txt.gz not found; using an empty thread-class set (as the cold run did)\n");
+            // Changed methods must use the same static-field nodes as the unchanged part of the loaded PAG.
+            smartAOTSeedStaticNodes(p);
         }
-        // end = std::chrono::high_resolution_clock::now();
-        // duration = std::chrono::duration_cast<std::chrono::microseconds>(end - start).count();
-        // std::cout << D_PREFIX << "Time taken to get thread related classes in update_PAG: " << duration << "  microseconds\n" << std::endl;
-        // std::cout.flush();
+
+        // traverse_cfg does not analyse library methods; do not remove the old body if it cannot be rebuilt.
+        if (isLibraryMethod(my_full_name))
+            return false;
 
         // start = std::chrono::high_resolution_clock::now();
+        // Drop the sync sites and call sites recorded for the old body of my: they reference nodes that
+        // removeNodes(my) deletes. traverse_cfg re-records them for the new body.
+        std::string syncPrefix = std::to_string(my) + "_";
+        for (auto it = p->CG.syncSites.begin(); it != p->CG.syncSites.end();)
+        {
+            if (it->first.compare(0, syncPrefix.size(), syncPrefix) == 0)
+                it = p->CG.syncSites.erase(it);
+            else
+                ++it;
+        }
+        std::string callPrefix = std::to_string(my) + " ";
+        for (auto it = p->CG.callsiteParams.begin(); it != p->CG.callsiteParams.end();)
+        {
+            if (it->first.compare(0, callPrefix.size(), callPrefix) == 0)
+                it = p->CG.callsiteParams.erase(it);
+            else
+                ++it;
+        }
+        for (auto it = p->CG.callsiteReceivers.begin(); it != p->CG.callsiteReceivers.end();)
+        {
+            if (it->first.compare(0, callPrefix.size(), callPrefix) == 0)
+                it = p->CG.callsiteReceivers.erase(it);
+            else
+                ++it;
+        }
+
         for (PAGNode *f_param : p->getFormalParameterNodes(my))
         {
             p->removeAllEdgesFrom(f_param);
@@ -337,13 +407,13 @@ public:
 
         // start = std::chrono::high_resolution_clock::now();
 
-        traverse_cfg(my_prime_J9Method, p, my, comp, new PAGNode(), comp_type_2);
+        bool analysed = traverse_cfg(my_prime_J9Method, p, my, comp, new PAGNode(), comp_type_2);
 
         // end = std::chrono::high_resolution_clock::now();
         // duration = std::chrono::duration_cast<std::chrono::microseconds>(end - start).count();
         // std::cout << D_PREFIX << "Time taken to traverse PAG in update_PAG: " << duration << "  microseconds\n" << std::endl;
         // std::cout.flush();
-        return p;
+        return analysed;
     }
     std::unordered_set<std::string> get_fields(PointerAssignmentGraph *p, PAGNode *obj)
     {
@@ -428,66 +498,105 @@ public:
         return false;
     }
 
-    bool should_recompile(int mx, PointerAssignmentGraph *p_prime, const std::unordered_set<PAGEdge *> &old_allocated_edges, const std::unordered_set<PAGNode *> &old_escaping_objects)
+    // Abstract objects are identified by their allocation site, which is stable across the in-place PAG update.
+    static uint64_t objKey(PAGNode *obj)
     {
-        auto leaky_nodes = p_prime->getLeakyNodes();
+        return ((uint64_t)(uint32_t)obj->methodIndex << 32) | (uint32_t)obj->bci;
+    }
 
-        std::string methodName = "UNKNOWN";
-        for (auto const& pair : p_prime->_methodIndices) {
-            if (pair.second == mx) {
-                methodName = pair.first;
-                break;
-            }
-        }
+    // ESCAPE(o, p) for all o at once: the set of objects o such that REACH(o, u, p) for some u in LEAKY(p).
+    // Single multi-source traversal from all leaky nodes, following the same edges as REACH.
+    std::unordered_set<uint64_t> computeEscapingObjectKeys(PointerAssignmentGraph *p)
+    {
+        std::unordered_set<uint64_t> escaping;
+        std::unordered_set<PAGNode *> visited;
+        std::queue<PAGNode *> queue;
 
-//        std::cout << "DEBUG: should_recompile called for mx=" << mx << " (" << methodName << ")"
-//                  << " old_allocated_edges.size()=" << old_allocated_edges.size() 
-//                  << " old_escaping_objects.size()=" << old_escaping_objects.size()
-//                  << " leaky_nodes.size()=" << leaky_nodes.size() << std::endl;
-
-        for (PAGEdge *alloc_edge : old_allocated_edges)
+        for (PAGNode *u : p->getLeakyNodes())
         {
-            PAGNode *o = alloc_edge->src;
+            if (u && visited.insert(u).second)
+                queue.push(u);
+        }
 
-            // Fast O(1) hash lookup
-            bool isEscaping = old_escaping_objects.find(o) != old_escaping_objects.end();
-            // std::cout << "DEBUG: Processing alloc_edge src (methodIndex=" << o->methodIndex << ", bci=" << o->bci << "), isEscaping=" << isEscaping << std::endl;
+        while (!queue.empty())
+        {
+            PAGNode *current = queue.front();
+            queue.pop();
 
-            if (isEscaping)
+            for (PAGNode *obj : p->points_to(current))
+                escaping.insert(objKey(obj));
+
+            for (PAGEdge *e : current->incoming)
             {
-                bool isReachable = false;
-                for (PAGNode *u : leaky_nodes)
-                {
-                    bool isReach = REACH(o, u, p_prime);
-                    // std::cout << "DEBUG: REACH(o, u) [Escaping] returned " << isReach << std::endl;
-                    isReachable |= isReach;
-                    if (isReachable)
-                        break; // Early exit avoids unnecessary traversals
-                }
-
-                // std::cout << "DEBUG: For Escaping obj, isReachable=" << isReachable << std::endl;
-
-                if (!isReachable) {
-                    // std::cout << "DEBUG: Returning true (recompile) because obj is no longer reachable!" << std::endl;
-                    return true; // Recompile mx
-                }
-            }
-            else
-            {
-                for (PAGNode *u : leaky_nodes)
-                {
-                    bool isReach = REACH(o, u, p_prime);
-                    // std::cout << "DEBUG: REACH(o, u) [Captured] returned " << isReach << std::endl;
-                    if (isReach)
-                    {
-                        // std::cout << "DEBUG: Returning true (recompile) because Captured obj became reachable!" << std::endl;
-                        return true; // Recompile mx
-                    }
-                }
+                if (e->type == EdgeType::PUTFIELD && !e->field.empty() && visited.insert(e->src).second)
+                    queue.push(e->src);
             }
         }
-        
-        // std::cout << "DEBUG: Returning false (no recompile needed)" << std::endl;
+        return escaping;
+    }
+
+    // SyncObjs(.) for all methods in one pass: objects on which a lock is taken in a method (monitorenter operands,
+    // and 'this' of a synchronized instance method), recorded as sync sites "<methodIndex>_<bci>".
+    std::unordered_map<int, std::unordered_set<uint64_t>> computeSyncObjKeysByMethod(PointerAssignmentGraph *p)
+    {
+        std::unordered_map<int, std::unordered_set<uint64_t>> byMethod;
+        for (const auto &entry : p->CG.syncSites)
+        {
+            int syncMethod = 0, bci = 0;
+            if (sscanf(entry.first.c_str(), "%d_%d", &syncMethod, &bci) != 2)
+                continue;
+            std::unordered_set<uint64_t> &objs = byMethod[syncMethod];
+            for (PAGNode *lockedVar : entry.second)
+            {
+                for (PAGNode *obj : p->points_to(lockedVar))
+                    objs.insert(objKey(obj));
+            }
+        }
+        return byMethod;
+    }
+
+    // OptCheck for lock elision (paper Sec. 3.4). Fails if
+    //   exists my in {mx} U deps(mx), o in SyncObjs(my) : ESCAPE(o, p) != ESCAPE(o, p')
+    // which covers Captured-to-Escaping (safety) and Escaping-to-Captured (missed opportunity).
+    // SyncObjs(my) is taken from both p and p' so that locks added to / removed from a changed dependency are covered.
+    // Objects are identified by allocation site (methodIndex, bci). For objects allocated in a changed method the bci
+    // does not identify the same allocation across versions, so those are compared per allocating method: the
+    // (some escaping, some captured) summary of my's locked objects allocated there must be the same in p and p'.
+    bool check_lock_elision(const std::unordered_set<int> &depSet, const std::unordered_set<int> &changedSet,
+                            const std::unordered_map<int, std::unordered_set<uint64_t>> &old_syncObjs,
+                            const std::unordered_map<int, std::unordered_set<uint64_t>> &new_syncObjs,
+                            const std::unordered_set<uint64_t> &old_escaping, const std::unordered_set<uint64_t> &new_escaping)
+    {
+        static const std::unordered_set<uint64_t> empty;
+        for (int my : depSet)
+        {
+            auto oldIt = old_syncObjs.find(my);
+            auto newIt = new_syncObjs.find(my);
+            const std::unordered_set<uint64_t> &oldObjs = oldIt != old_syncObjs.end() ? oldIt->second : empty;
+            const std::unordered_set<uint64_t> &newObjs = newIt != new_syncObjs.end() ? newIt->second : empty;
+
+            // allocating (changed) method -> bits: 1 = escaping, 2 = captured
+            std::unordered_map<int, int> oldSummary, newSummary;
+
+            for (uint64_t o : oldObjs)
+            {
+                int allocMethod = (int)(uint32_t)(o >> 32);
+                if (changedSet.count(allocMethod))
+                    oldSummary[allocMethod] |= old_escaping.count(o) ? 1 : 2;
+                else if (old_escaping.count(o) != new_escaping.count(o))
+                    return true;
+            }
+            for (uint64_t o : newObjs)
+            {
+                int allocMethod = (int)(uint32_t)(o >> 32);
+                if (changedSet.count(allocMethod))
+                    newSummary[allocMethod] |= new_escaping.count(o) ? 1 : 2;
+                else if (old_escaping.count(o) != new_escaping.count(o))
+                    return true;
+            }
+            if (oldSummary != newSummary)
+                return true;
+        }
         return false;
     }
 
@@ -656,7 +765,8 @@ public:
     }
     int globalIndex_ = 0;
 
-    void traverse_cfg(J9Method *method, PointerAssignmentGraph *pag, int methodIndex, TR::Compilation *comp, PAGNode *primitive_node, PAGNode *comp_type2_primitiveNode)
+    // Returns false if the method could not be analysed.
+    bool traverse_cfg(J9Method *method, PointerAssignmentGraph *pag, int methodIndex, TR::Compilation *comp, PAGNode *primitive_node, PAGNode *comp_type2_primitiveNode)
     {
         TR_OpaqueMethodBlock *method_block = reinterpret_cast<TR_OpaqueMethodBlock *>(method);
         int32_t methodSize = TR::Compiler->mtd.bytecodeSize(method_block);
@@ -705,8 +815,17 @@ public:
             }
         }
         std::string fullNAME = className + "." + name + signature;
-        if (isLibraryMethod(fullNAME) || all_loaded_classes.find(className) == all_loaded_classes.end()) {
-            return;
+        // Same filtering as the cold-run analysis (OMROptimizer traverse_cfg): no bytecode for abstract/native methods.
+        // (The cold run does not filter by all_loaded_classes, so neither may the warm run: skipping here would drop
+        // the changed method's effects from the PAG.)
+        if ((romMethod->modifiers & (J9AccAbstract | J9AccNative)) != 0)
+        {
+            analysedMethodNames.insert(fullNAME);
+            return true;
+        }
+        if (isLibraryMethod(fullNAME))
+        {
+            return false;
         }
 
         if (analysedMethodNames.find(fullNAME) == analysedMethodNames.end())
@@ -760,7 +879,9 @@ public:
 
         if (reference_params != formal_param_nodes.size())
         {
-            TR_ASSERT_FATAL(0, "There is a mismatch in the size of paramters maybe the method signature changed.");
+            fprintf(stderr, "[SmartAOT] ERROR: formal parameter mismatch while re-analysing %s (%d reference params, %d formal nodes)\n",
+                    fullNAME.c_str(), reference_params, (int)formal_param_nodes.size());
+            return false;
         }
 
         for (int i = 0; i < reference_params; i++)
@@ -770,6 +891,11 @@ public:
             else
                 variableMap[formal_param_nodes[i]->name] = formal_param_nodes[i]; // non-static methods, slot 0 -> this
         }
+
+        // SmartAOT: a synchronized instance method locks 'this' on entry; record it as sync site "<methodIndex>_-1".
+        // (Static synchronized methods lock the Class object, which always escapes, so the lock is never elided.)
+        if ((romMethod->modifiers & J9AccSynchronized) && !(romMethod->modifiers & J9AccStatic) && variableMap.count(0))
+            pag->CG.syncSites[std::to_string(methodIndex) + "_-1"] = std::vector<PAGNode *>{variableMap[0]};
 
         int32_t currentIndex = 0;
         int statementCount = 0;
@@ -796,8 +922,28 @@ public:
         unordered_set<int> worklist_bb_bci;
         worklist_bb_bci.insert(entryBlock->startBCI);
 
+        // SmartAOT: once the normal control flow is done, analyse the exception handlers, each starting with the
+        // caught exception (the bottom node) on the operand stack -- same as the cold-run analysis.
+        bool handlersSeeded = false;
+        auto seedExceptionHandlers = [&]() -> bool
+        {
+            handlersSeeded = true;
+            for (int32_t handlerPC : smartAOTExceptionHandlerPCs(method))
+            {
+                auto handlerIt = blocks.find(handlerPC);
+                if (handlerIt == blocks.end() || inStacks.count(handlerIt->second))
+                    continue;
+                operandStack *handlerStack = new operandStack();
+                handlerStack->pushRef(pag->bottom_node);
+                inStacks[handlerIt->second] = handlerStack;
+                worklist.push(handlerIt->second);
+                worklist_bb_bci.insert(handlerPC);
+            }
+            return !worklist.empty();
+        };
+
         // start = std::chrono::high_resolution_clock::now();
-        while (!worklist.empty())
+        while (!worklist.empty() || (!handlersSeeded && seedExceptionHandlers()))
         {
             Block *bb = worklist.front();
             worklist.pop();
@@ -855,5 +1001,6 @@ public:
 
         std::string fully_qualified_name = className + "." + name + signature;
         analysedMethodNames.insert(fully_qualified_name);
+        return true;
     }
 };
