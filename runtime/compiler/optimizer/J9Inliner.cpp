@@ -1342,17 +1342,6 @@ void TR_ProfileableCallSite::findSingleProfiledReceiver(ListIterator<TR_ExtraAdd
             continue;
             }
 
-         if (preferMethodTest && isInterface())
-            {
-            // For interface call sites, the profiled guard must allow only
-            // receivers that are instances of the expected interface. See the
-            // comment in TR_J9InterfaceCallSite::findCallSiteTarget().
-            TR_OpaqueClassBlock *defClass = targetMethod->containingClass();
-            TR_OpaqueClassBlock *iface = getClassFromMethod();
-            if (fe()->isInstanceOf(defClass, iface, true, true, true) != TR_yes)
-               preferMethodTest = false;
-            }
-
          TR_J9VMBase *fej9 = (TR_J9VMBase *)(comp()->fe());
          // need to be able to store class chains for these methods
          if (comp()->compileRelocatableCode())
@@ -1381,6 +1370,19 @@ void TR_ProfileableCallSite::findSingleProfiledReceiver(ListIterator<TR_ExtraAdd
                   traceMsg(comp(), "inliner: profiled class [%p] or callSiteClass [%p] cannot be rememberd in shared cache\n", tempreceiverClass, callSiteClass);
                continue;
                }
+            }
+
+         // Done after the validation records above: with the SVM, isInstanceOf() records the
+         // result, which needs defClass to be validated already
+         if (preferMethodTest && isInterface())
+            {
+            // For interface call sites, the profiled guard must allow only
+            // receivers that are instances of the expected interface. See the
+            // comment in TR_J9InterfaceCallSite::findCallSiteTarget().
+            TR_OpaqueClassBlock *defClass = targetMethod->containingClass();
+            TR_OpaqueClassBlock *iface = getClassFromMethod();
+            if (fe()->isInstanceOf(defClass, iface, true, true, true) != TR_yes)
+               preferMethodTest = false;
             }
 
          TR_VirtualGuardSelection *guard = NULL;
