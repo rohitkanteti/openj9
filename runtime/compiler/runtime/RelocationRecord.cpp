@@ -1545,29 +1545,55 @@ static bool smartAOTSameUTF8(J9UTF8 *a, J9UTF8 *b)
    return J9UTF8_LENGTH(a) == J9UTF8_LENGTH(b) && memcmp(J9UTF8_DATA(a), J9UTF8_DATA(b), J9UTF8_LENGTH(a)) == 0;
 }
 
+// Diagnostic only: the first layout difference found by the check below, printed with the discard message
+static thread_local char smartAOTLayoutDiff[512];
+
+static bool smartAOTLayoutDiffers(J9ROMClass *oldROM, J9ROMClass *newROM, const char *what)
+{
+   J9ROMClass *rom = newROM ? newROM : oldROM;
+   J9UTF8 *name = rom ? J9ROMCLASS_CLASSNAME(rom) : NULL;
+   snprintf(smartAOTLayoutDiff, sizeof(smartAOTLayoutDiff), "%.*s: %s",
+            name ? (int)J9UTF8_LENGTH(name) : 1, name ? (const char *)J9UTF8_DATA(name) : "?", what);
+   return false;
+}
+
 static bool smartAOTSameROMClassLayout(J9ROMClass *oldROM, J9ROMClass *newROM)
 {
+   char what[256];
    if (oldROM == newROM)
       return true;
    if (!oldROM || !newROM)
-      return false;
+      return smartAOTLayoutDiffers(oldROM, newROM, oldROM ? "class chain shorter in this run" : "class chain longer in this run");
    if (!smartAOTSameUTF8(J9ROMCLASS_CLASSNAME(oldROM), J9ROMCLASS_CLASSNAME(newROM)) ||
        !smartAOTSameUTF8(J9ROMCLASS_SUPERCLASSNAME(oldROM), J9ROMCLASS_SUPERCLASSNAME(newROM)))
-      return false;
+   {
+      J9UTF8 *oldName = J9ROMCLASS_CLASSNAME(oldROM);
+      snprintf(what, sizeof(what), "class or superclass name differs (cached chain has %.*s)", (int)J9UTF8_LENGTH(oldName), (const char *)J9UTF8_DATA(oldName));
+      return smartAOTLayoutDiffers(oldROM, newROM, what);
+   }
 
    if (oldROM->interfaceCount != newROM->interfaceCount)
-      return false;
+   {
+      snprintf(what, sizeof(what), "interface count %u -> %u", oldROM->interfaceCount, newROM->interfaceCount);
+      return smartAOTLayoutDiffers(oldROM, newROM, what);
+   }
    J9SRP *oldInterfaces = J9ROMCLASS_INTERFACES(oldROM);
    J9SRP *newInterfaces = J9ROMCLASS_INTERFACES(newROM);
    for (U_32 i = 0; i < oldROM->interfaceCount; i++)
    {
       if (!smartAOTSameUTF8(NNSRP_PTR_GET(&oldInterfaces[i], J9UTF8 *), NNSRP_PTR_GET(&newInterfaces[i], J9UTF8 *)))
-         return false;
+      {
+         snprintf(what, sizeof(what), "interface %u differs", i);
+         return smartAOTLayoutDiffers(oldROM, newROM, what);
+      }
    }
 
    // Fields, in declaration order (instance field offsets are derived from it).
    if (oldROM->romFieldCount != newROM->romFieldCount)
-      return false;
+   {
+      snprintf(what, sizeof(what), "field count %u -> %u", oldROM->romFieldCount, newROM->romFieldCount);
+      return smartAOTLayoutDiffers(oldROM, newROM, what);
+   }
    J9ROMFieldWalkState oldFieldWalk, newFieldWalk;
    J9ROMFieldShape *oldField = romFieldsStartDo(oldROM, &oldFieldWalk);
    J9ROMFieldShape *newField = romFieldsStartDo(newROM, &newFieldWalk);
@@ -1576,24 +1602,42 @@ static bool smartAOTSameROMClassLayout(J9ROMClass *oldROM, J9ROMClass *newROM)
       if ((oldField->modifiers & J9AccStatic) != (newField->modifiers & J9AccStatic) ||
           !smartAOTSameUTF8(J9ROMFIELDSHAPE_NAME(oldField), J9ROMFIELDSHAPE_NAME(newField)) ||
           !smartAOTSameUTF8(J9ROMFIELDSHAPE_SIGNATURE(oldField), J9ROMFIELDSHAPE_SIGNATURE(newField)))
-         return false;
+      {
+         J9UTF8 *o = J9ROMFIELDSHAPE_NAME(oldField), *n = J9ROMFIELDSHAPE_NAME(newField);
+         snprintf(what, sizeof(what), "field %.*s -> %.*s", (int)J9UTF8_LENGTH(o), (const char *)J9UTF8_DATA(o), (int)J9UTF8_LENGTH(n), (const char *)J9UTF8_DATA(n));
+         return smartAOTLayoutDiffers(oldROM, newROM, what);
+      }
       oldField = romFieldsNextDo(&oldFieldWalk);
       newField = romFieldsNextDo(&newFieldWalk);
    }
    if (oldField || newField)
-      return false;
+      return smartAOTLayoutDiffers(oldROM, newROM, "field list length differs");
 
    // Methods, in order (vtable slots and method indices are derived from it). Bodies may differ.
    if (oldROM->romMethodCount != newROM->romMethodCount)
-      return false;
+   {
+      snprintf(what, sizeof(what), "method count %u -> %u", oldROM->romMethodCount, newROM->romMethodCount);
+      return smartAOTLayoutDiffers(oldROM, newROM, what);
+   }
+   // Only the Java access flags belong to the layout. The low 16 bits also hold J9 flags derived from the method
+   // body (J9AccGetterMethod, J9AccEmptyMethod), which change whenever a body changes from or to a trivial getter.
+   const U_32 javaMethodFlags = J9AccPublic | J9AccPrivate | J9AccProtected | J9AccStatic | J9AccFinal |
+                                J9AccSynchronized | J9AccBridge | J9AccVarArgs | J9AccNative | J9AccAbstract |
+                                J9AccStrict | J9AccSynthetic;
    J9ROMMethod *oldMethod = J9ROMCLASS_ROMMETHODS(oldROM);
    J9ROMMethod *newMethod = J9ROMCLASS_ROMMETHODS(newROM);
    for (U_32 i = 0; i < oldROM->romMethodCount; i++)
    {
-      if ((oldMethod->modifiers & 0xFFFF) != (newMethod->modifiers & 0xFFFF) ||
+      if ((oldMethod->modifiers & javaMethodFlags) != (newMethod->modifiers & javaMethodFlags) ||
           !smartAOTSameUTF8(J9ROMMETHOD_NAME(oldMethod), J9ROMMETHOD_NAME(newMethod)) ||
           !smartAOTSameUTF8(J9ROMMETHOD_SIGNATURE(oldMethod), J9ROMMETHOD_SIGNATURE(newMethod)))
-         return false;
+      {
+         J9UTF8 *o = J9ROMMETHOD_NAME(oldMethod), *n = J9ROMMETHOD_NAME(newMethod);
+         snprintf(what, sizeof(what), "method %u: %.*s -> %.*s (modifiers 0x%x -> 0x%x)", i,
+                  (int)J9UTF8_LENGTH(o), (const char *)J9UTF8_DATA(o), (int)J9UTF8_LENGTH(n), (const char *)J9UTF8_DATA(n),
+                  (unsigned)(oldMethod->modifiers & javaMethodFlags), (unsigned)(newMethod->modifiers & javaMethodFlags));
+         return smartAOTLayoutDiffers(oldROM, newROM, what);
+      }
       oldMethod = nextROMMethod(oldMethod);
       newMethod = nextROMMethod(newMethod);
    }
@@ -1634,7 +1678,9 @@ static bool smartAOTClassChainLayoutUnchanged(TR_J9SharedCache *sharedCache, TR_
       if (!smartAOTSameROMClassLayout(nextOldROMClass(), TR::Compiler->cls.iTableRomClass(element)))
          return false;
    }
-   return chainPtr == chainEnd;
+   if (chainPtr != chainEnd)
+      return smartAOTLayoutDiffers(NULL, TR::Compiler->cls.romClassOf(clazz), "cached class chain has more superclasses/interfaces than this run");
+   return true;
 }
 
 // Finds the class a failed salvageable validation record refers to and checks that its layout is unchanged. Returns
@@ -1765,6 +1811,7 @@ TR_RelocationRecordGroup::applyRelocations(TR_RelocationRuntime *reloRuntime,
             // The OptChecks only validate the optimizations; first make sure the class whose validation failed still
             // has the layout the code was compiled against.
             const char *layoutNotChecked = NULL;
+            smartAOTLayoutDiff[0] = '\0';
             bool layoutUnchanged = smartAOTFailedClassLayoutUnchanged(reloRuntime, reloTarget, reloRecord, reloType, &layoutNotChecked);
             if (layoutNotChecked)
             {
@@ -1777,8 +1824,8 @@ TR_RelocationRecordGroup::applyRelocations(TR_RelocationRuntime *reloRuntime,
             {
                static std::atomic<int> layout_fails(0);
                layout_fails++;
-               fprintf(stderr, "[SmartAOT] Discarding method because the layout of a class it depends on changed (relo type %d): %s (Total Layout Fails: %d)\n",
-                       (int)reloType, reloRuntime->currentResolvedMethod()->signature(reloRuntime->comp()->trMemory()), (int)layout_fails);
+               fprintf(stderr, "[SmartAOT] Discarding method because the layout of a class it depends on changed (relo type %d): %s (Total Layout Fails: %d) [%s]\n",
+                       (int)reloType, reloRuntime->currentResolvedMethod()->signature(reloRuntime->comp()->trMemory()), (int)layout_fails, smartAOTLayoutDiff);
             }
             bool reuse = layoutUnchanged ? testIfCanBeReUsed(reloRuntime, changedMethodNamesFile) : NEED_TO_RECOMPILE;
             auto end = std::chrono::high_resolution_clock::now();
@@ -5011,6 +5058,25 @@ TR_RelocationRecordValidateArbitraryClass::applyRelocation(TR_RelocationRuntime 
 
    if (aotStats)
       aotStats->numClassValidationsFailed++;
+
+   // Diagnostic only (SmartAOT and baseline alike): which class and which loader this record could not find
+   {
+      uintptr_t *chainForClass = (uintptr_t *)sharedCache->pointerFromOffsetInSharedCache(classChainOffsetForClassBeingValidated(reloTarget));
+      J9UTF8 *className = J9ROMCLASS_CLASSNAME(sharedCache->startingROMClassOfClassChain(chainForClass));
+      J9UTF8 *loaderClassName = J9ROMCLASS_CLASSNAME(sharedCache->startingROMClassOfClassChain((uintptr_t *)classChainIdentifyingLoader));
+      const char *why = "class loader not found";
+      if (classLoader)
+      {
+         TR::VMAccessCriticalSection diagLookup(reloRuntime->fej9());
+         J9Class *byName = jitGetClassInClassloaderFromUTF8(reloRuntime->fej9()->getCurrentVMThread(), classLoader,
+                                                            (char *)J9UTF8_DATA(className), J9UTF8_LENGTH(className));
+         why = byName ? "class loaded but its class chain differs" : "class not loaded yet";
+      }
+      fprintf(stderr, "[AOTDiag] arbitraryClass validation failed (%s): class %.*s, loader identified by %.*s, method %s\n",
+              why, (int)J9UTF8_LENGTH(className), (const char *)J9UTF8_DATA(className),
+              (int)J9UTF8_LENGTH(loaderClassName), (const char *)J9UTF8_DATA(loaderClassName),
+              reloRuntime->currentResolvedMethod()->signature(reloRuntime->comp()->trMemory()));
+   }
 
    return TR_RelocationErrorCode::arbitraryClassValidationFailure;
 }

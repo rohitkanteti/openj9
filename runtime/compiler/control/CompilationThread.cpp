@@ -5994,6 +5994,41 @@ void *TR::CompilationInfo::compileOnSeparateThread(J9VMThread *vmThread, TR::IlG
    J9Method *method = details.getMethod();
    TR_J9VMBase *fe = TR_J9VMBase::get(_jitConfig, vmThread);
 
+   // A first-time compilation of a method that the compilation filters (limit=/exclude=) reject would be queued
+   // only to be dropped by the compilation thread ("cannot be translated", see wrappedCompile). With -Xaot:count=1
+   // and a narrow limit= that is tens of thousands of entries, and the methods the filters allow wait behind them.
+   // Reject such requests here, with the same check, and stop counting the method as the dropped compile would.
+   if (!oldStartPC && details.isOrdinaryMethod() && !details.isMethodInProgress() &&
+       TR::Options::getDebug() && TR::Options::getDebug()->getCompilationFilters()
+#if defined(J9VM_OPT_JITSERVER)
+       && getPersistentInfo()->getRemoteCompilationMode() != JITServer::SERVER
+#endif
+      )
+   {
+      J9UTF8 *className;
+      J9UTF8 *name;
+      J9UTF8 *signature;
+      getClassNameSignatureFromMethod(method, className, name, signature);
+      char arr[1024];
+      int32_t len = J9UTF8_LENGTH(className) + J9UTF8_LENGTH(name) + J9UTF8_LENGTH(signature) + 3;
+      if (len <= (int32_t)sizeof(arr)) // longer signatures go through the queue as before
+      {
+         snprintf(arr, len, "%.*s.%.*s%.*s", J9UTF8_LENGTH(className), utf8Data(className),
+                  J9UTF8_LENGTH(name), utf8Data(name), J9UTF8_LENGTH(signature), utf8Data(signature));
+         TR_FilterBST *filter = NULL;
+         if (!TR::Options::getDebug()->methodSigCanBeCompiled(arr, filter, TR::Method::J9))
+         {
+            if (TR::Options::getJITCmdLineOptions()->getVerboseOption(TR_VerboseCompileExclude) ||
+                TR::Options::getAOTCmdLineOptions()->getVerboseOption(TR_VerboseCompileExclude))
+               TR_VerboseLog::writeLineLocked(TR_Vlog_COMPFAIL, "%s j9m=%p cannot be translated (rejected at request)", arr, method);
+            jitMethodFailedTranslation(vmThread, method);
+            if (compErrCode)
+               *compErrCode = compilationRestrictedMethod;
+            return NULL;
+         }
+      }
+   }
+
    // Grab the compilation monitor
    //
    debugPrint(vmThread, "\tapplication thread acquiring compilation monitor\n");
