@@ -131,9 +131,19 @@ enum recompile_test_answers
    REUSE
 };
 bool smartAOTLoad = false;
+// SmartAOT "INVALID (usable)": set when a body failed an OptCheck but is kept. Relocation and installation happen on the
+// same compilation thread, which then queues a JIT recompilation of the method (CompilationThread.cpp), so the body only
+// runs until the recompiled one replaces it. VALID bodies (all OptChecks passed) are not recompiled.
+static thread_local bool smartAOTUsableBody = false;
+bool smartAOTTakeUsableBodyFlag()
+   {
+   bool usable = smartAOTUsableBody;
+   smartAOTUsableBody = false;
+   return usable;
+   }
 // Snapshot of the cold-run (old PAG p) analysis results, taken before the PAG is updated in place.
 static std::unordered_set<uint64_t> old_escaping_objects;                              // ESCAPE(., p)
-static std::unordered_map<int, std::unordered_set<uint64_t>> methodIndex_to_old_syncObjs; // SyncObjs(., p)
+static std::unordered_map<std::string, bool> syncSite_to_old_escape;                    // ESCAPE_var(v, p) per sync site
 static std::unordered_map<int, std::unordered_map<std::string, std::unordered_set<std::string>>> methodIndex_to_old_callsite_types;
 // Methods whose bodies the cold-run analysis actually traversed (analyzedMethods.txt.gz). A method that only has a
 // method index (e.g. it was only seen as a callee) has no sync sites / call sites in the PAG to validate against.
@@ -141,7 +151,7 @@ static std::unordered_set<std::string> cold_analysed_methods;
 static bool old_results_gathered = false;
 // Results on the updated PAG p', computed once after the incremental update.
 static std::unordered_set<uint64_t> new_escaping_objects;                              // ESCAPE(., p')
-static std::unordered_map<int, std::unordered_set<uint64_t>> methodIndex_to_new_syncObjs; // SyncObjs(., p')
+static std::unordered_map<std::string, bool> syncSite_to_new_escape;                    // ESCAPE_var(v, p') per sync site
 static std::unordered_set<int> changed_method_indices;
 // Methods with an instance call site whose receiver could not be resolved when loading the PAG.
 static std::unordered_set<int> methods_with_unresolved_receivers;
@@ -174,6 +184,11 @@ static std::unordered_set<std::string> modified_method_names;
 static std::vector<J9Method *> modified_methods;
 static PointerAssignmentGraph *loaded_pag = nullptr;
 static std::unordered_map<std::string, bool> result_cache;
+// Methods whose NEED_TO_RECOMPILE came from a failed OptCheck (inline / lock elision), i.e. INVALID (usable), as opposed
+// to a structural change or a method that cannot be validated (INVALID). Guarded by pag_relocation_mutex like result_cache.
+static std::unordered_set<std::string> optcheck_failed_methods;
+// Set by testIfCanBeReUsed for the caller on this thread: true when its NEED_TO_RECOMPILE answer was an OptCheck failure
+static thread_local bool smartAOTLastAnswerOptCheckFailed = false;
 static bool file_checked = false;
 static std::unordered_map<std::string, long> verified_method_timestamps;
 
@@ -432,7 +447,7 @@ long getClassFileTimestamp(J9Class *clazz, TR::Compilation *comp)
 // ---------------------------------------------------------------------------
 // Registry lookup helper
 //
-// Calls HotRunLoadingAgent.getV2Class(internalName) via JNI and returns the
+// Calls ForNameAgent.getV2Class(internalName) via JNI and returns the
 // J9Class* from the resulting jclass.  Returns nullptr if the registry is
 // empty, the class is not found, or the agent has not initialised yet.
 //
@@ -465,7 +480,7 @@ static J9Class *lookupInAgentRegistry(J9VMThread *vmThread, const std::string &i
       javaVM->internalVMFunctions->internalExitVMToJNI(vmThread);
    }
 
-   jclass agentClass = env->FindClass("HotRunLoadingAgent");
+   jclass agentClass = env->FindClass("ForNameAgent");
    if (agentClass && !env->ExceptionCheck())
    {
       jmethodID getV2ClassMID = env->GetStaticMethodID(
@@ -654,9 +669,11 @@ bool testIfCanBeReUsed(TR_RelocationRuntime *reloRuntime, char *changedMethodNam
       lock.lock();
    }
 
+   smartAOTLastAnswerOptCheckFailed = false;
    auto cache_it = result_cache.find(mx_methodSignature);
    if (cache_it != result_cache.end())
    {
+      smartAOTLastAnswerOptCheckFailed = optcheck_failed_methods.count(mx_methodSignature) != 0;
       return cache_it->second;
    }
 
@@ -751,7 +768,7 @@ bool testIfCanBeReUsed(TR_RelocationRuntime *reloRuntime, char *changedMethodNam
       old_results_gathered = true;
       cold_analysed_methods = analysedMethodNames; // before the warm run edits the set
       old_escaping_objects = rec_test.computeEscapingObjectKeys(loaded_pag);
-      methodIndex_to_old_syncObjs = rec_test.computeSyncObjKeysByMethod(loaded_pag);
+      syncSite_to_old_escape = rec_test.computeSyncVarEscape(loaded_pag, old_escaping_objects);
 
       // Receiver types of every instance call site in p (the receivers are recorded explicitly by the cold run).
       for (const auto &entry : loaded_pag->CG.callsiteReceivers) {
@@ -800,9 +817,7 @@ bool testIfCanBeReUsed(TR_RelocationRuntime *reloRuntime, char *changedMethodNam
    }
    if (structurally_invalid)
    {
-      static std::atomic<int> structural_fails(0);
-      structural_fails++;
-      fprintf(stderr, "[SmartAOT] Discarding method due to structural change (method or inlined callee modified): %s (Total Structural Fails: %d)\n", mx_methodSignature.c_str(), (int)structural_fails);
+      fprintf(stderr, "[SmartAOT] Discarding method due to structural change (method or inlined callee modified): %s\n", mx_methodSignature.c_str());
       methodIndex_to_CanItBeResused[mx] = RECOMPILE;
       result_cache[mx_methodSignature] = NEED_TO_RECOMPILE;
       return NEED_TO_RECOMPILE;
@@ -828,9 +843,7 @@ bool testIfCanBeReUsed(TR_RelocationRuntime *reloRuntime, char *changedMethodNam
       }
       if (!unanalysed.empty())
       {
-         static std::atomic<int> unanalysed_fails(0);
-         unanalysed_fails++;
-         fprintf(stderr, "[SmartAOT] Discarding method because %s was not analysed in the cold run: %s (Total Unanalysed Fails: %d)\n", unanalysed.c_str(), mx_methodSignature.c_str(), (int)unanalysed_fails);
+         fprintf(stderr, "[SmartAOT] Discarding method because %s was not analysed in the cold run: %s\n", unanalysed.c_str(), mx_methodSignature.c_str());
          methodIndex_to_CanItBeResused[mx] = RECOMPILE;
          result_cache[mx_methodSignature] = NEED_TO_RECOMPILE;
          return NEED_TO_RECOMPILE;
@@ -860,14 +873,14 @@ bool testIfCanBeReUsed(TR_RelocationRuntime *reloRuntime, char *changedMethodNam
       TR_J9VMBase *fej9 = (TR_J9VMBase *)comp->fe();
       TR_ResolvedMethod *contextMethod = reloRuntime->currentResolvedMethod();
 
-      J9Class *agentJ9Class = findClassAcrossAllLoaders(comp, "HotRunLoadingAgent", fej9, contextMethod);
-      // TR_ASSERT_FATAL(agentJ9Class, "Could not find HotRunLoadingAgent class block!");
+      J9Class *agentJ9Class = findClassAcrossAllLoaders(comp, "ForNameAgent", fej9, contextMethod);
+      // TR_ASSERT_FATAL(agentJ9Class, "Could not find ForNameAgent class block!");
       if (!agentJ9Class)
       {
          // Agent not present (cold run) or not yet visible in classLoaderBlocks.
          // lookupInAgentRegistry handles the registry path directly via JNI —
          // we do not need agentJ9Class for anything else. Skip this block.
-         fprintf(stderr, "[VALIDATOR] HotRunLoadingAgent not found via loader walk — "
+         fprintf(stderr, "[VALIDATOR] ForNameAgent not found via loader walk — "
                         "registry lookup will handle V2 class resolution directly.\n");
       }
 
@@ -1030,7 +1043,7 @@ bool testIfCanBeReUsed(TR_RelocationRuntime *reloRuntime, char *changedMethodNam
       }
       updateMatchEdges(updated_pag);
       new_escaping_objects = rec_test.computeEscapingObjectKeys(updated_pag);
-      methodIndex_to_new_syncObjs = rec_test.computeSyncObjKeysByMethod(updated_pag);
+      syncSite_to_new_escape = rec_test.computeSyncVarEscape(updated_pag, new_escaping_objects);
       // Only now is the updated PAG complete.
       pag_update_failed = update_failed;
    }
@@ -1042,38 +1055,19 @@ bool testIfCanBeReUsed(TR_RelocationRuntime *reloRuntime, char *changedMethodNam
       return NEED_TO_RECOMPILE;
    }
 
-   bool recompile_ea = rec_test.check_lock_elision(depSet, changed_method_indices, methodIndex_to_old_syncObjs, methodIndex_to_new_syncObjs, old_escaping_objects, new_escaping_objects);
-   bool recompile_pa = rec_test.check_pa_inlining(depSet, changed_method_indices, updated_pag, methodIndex_to_old_callsite_types, methods_with_unresolved_receivers);
-   
-   fprintf(stderr, "recompile_ea=%s\n", recompile_ea ? "true" : "false");
-   fprintf(stderr, "recompile_pa=%s\n", recompile_pa ? "true" : "false");
-
-   if (recompile_pa)
-   {
-      static std::atomic<int> inline_fails(0);
-      inline_fails++;
-      fprintf(stderr, "[SmartAOT] Discarding method due to inline check failure: %s (Total Inline Fails: %d)\n", mx_methodSignature.c_str(), (int)inline_fails);
-   }
-   else if (recompile_ea)
-   {
-      static std::atomic<int> ea_fails(0);
-      ea_fails++;
-      fprintf(stderr, "[SmartAOT] Discarding method due to escape analysis (lock elision) check failure: %s (Total EA Fails: %d)\n", mx_methodSignature.c_str(), (int)ea_fails);
-   }
-
-   fflush(stdout);
+   // SyncVars of mx and its dependencies (depSet: inlined and peeked methods) are compared
+   std::string ea_reason, pa_reason; // what made an OptCheck fail (debug output)
+   bool recompile_ea = rec_test.check_lock_elision(depSet, syncSite_to_old_escape, syncSite_to_new_escape, updated_pag, &ea_reason);
+   bool recompile_pa = rec_test.check_pa_inlining(depSet, changed_method_indices, updated_pag, methodIndex_to_old_callsite_types, methods_with_unresolved_receivers, &pa_reason);
 
    if (recompile_ea || recompile_pa)
    {
+      // INVALID (usable): applyRelocations keeps the body and the method is queued for recompilation
       methodIndex_to_CanItBeResused[mx] = RECOMPILE;
       result_cache[mx_methodSignature] = NEED_TO_RECOMPILE;
+      optcheck_failed_methods.insert(mx_methodSignature);
+      smartAOTLastAnswerOptCheckFailed = true;
       return NEED_TO_RECOMPILE;
-   }
-
-   {
-      static std::atomic<int> reused(0);
-      reused++;
-      fprintf(stderr, "[SmartAOT] Reusing method, all OptChecks passed (inline + lock elision): %s (Total Reused: %d)\n", mx_methodSignature.c_str(), (int)reused);
    }
 
    methodIndex_to_CanItBeResused[mx] = REUSE;
@@ -1749,6 +1743,7 @@ TR_RelocationRecordGroup::applyRelocations(TR_RelocationRuntime *reloRuntime,
                                            TR_RelocationTarget *reloTarget,
                                            uint8_t *reloOrigin)
 {
+   smartAOTUsableBody = false; // a flag left by an earlier load on this thread that failed after the decision
    const uintptr_t *wkClassChainOffsets =
        wellKnownClassChainOffsets(reloRuntime, reloTarget);
    TR_AOTStats *aotStats = reloRuntime->aotStats();
@@ -1815,30 +1810,35 @@ TR_RelocationRecordGroup::applyRelocations(TR_RelocationRuntime *reloRuntime,
             bool layoutUnchanged = smartAOTFailedClassLayoutUnchanged(reloRuntime, reloTarget, reloRecord, reloType, &layoutNotChecked);
             if (layoutNotChecked)
             {
-               static std::atomic<int> layout_unchecked(0);
-               layout_unchecked++;
-               fprintf(stderr, "[SmartAOT] Layout not checked (relo type %d, %s): %s (Total Unchecked: %d)\n",
-                       (int)reloType, layoutNotChecked, reloRuntime->currentResolvedMethod()->signature(reloRuntime->comp()->trMemory()), (int)layout_unchecked);
+               fprintf(stderr, "[SmartAOT] Layout not checked (relo type %d, %s): %s\n",
+                       (int)reloType, layoutNotChecked, reloRuntime->currentResolvedMethod()->signature(reloRuntime->comp()->trMemory()));
             }
             if (!layoutUnchanged)
             {
-               static std::atomic<int> layout_fails(0);
-               layout_fails++;
-               fprintf(stderr, "[SmartAOT] Discarding method because the layout of a class it depends on changed (relo type %d): %s (Total Layout Fails: %d) [%s]\n",
-                       (int)reloType, reloRuntime->currentResolvedMethod()->signature(reloRuntime->comp()->trMemory()), (int)layout_fails, smartAOTLayoutDiff);
+               fprintf(stderr, "[SmartAOT] Discarding method because the layout of a class it depends on changed (relo type %d): %s [%s]\n",
+                       (int)reloType, reloRuntime->currentResolvedMethod()->signature(reloRuntime->comp()->trMemory()), smartAOTLayoutDiff);
             }
             bool reuse = layoutUnchanged ? testIfCanBeReUsed(reloRuntime, changedMethodNamesFile) : NEED_TO_RECOMPILE;
+            // INVALID (usable): only an OptCheck failure; a changed layout, a structural change or a method that cannot
+            // be validated stays INVALID and the body is discarded
+            bool usable = layoutUnchanged && reuse == NEED_TO_RECOMPILE && smartAOTLastAnswerOptCheckFailed;
             auto end = std::chrono::high_resolution_clock::now();
             auto duration = std::chrono::duration_cast<std::chrono::microseconds>(end - start);
 
             // Per validation-record call; the first call also includes waiting for the PAG load and the one-time PAG update,
             // later calls for the same method hit result_cache.
+            // INVALID (usable) bodies are executed, so they are logged as REUSE (their recompilation is queued as before)
             fprintf(stderr, "[SmartAOT] ValidationCost: %llu us, result=%s, method=%s\n", (unsigned long long)duration.count(),
-                    reuse == CAN_BE_REUSED ? "REUSE" : "RECOMPILE",
+                    (reuse == CAN_BE_REUSED || usable) ? "REUSE" : "RECOMPILE",
                     reloRuntime->currentResolvedMethod()->signature(reloRuntime->comp()->trMemory()));
 
-            if (reuse == CAN_BE_REUSED)
+            if (reuse == CAN_BE_REUSED) // VALID
             {
+               goto OK;
+            }
+            if (usable)
+            {
+               smartAOTUsableBody = true; // run this body; the compilation thread queues the recompilation
                goto OK;
             }
 

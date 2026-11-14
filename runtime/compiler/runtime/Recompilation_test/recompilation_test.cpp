@@ -21,6 +21,7 @@
 #include <string.h>
 #include <fstream>
 #include "env/VMAccessCriticalSection.hpp"
+#include "env/ClassTableCriticalSection.hpp"
 #include "../../../../../omr/gc/structs/PoolIterator.hpp"
 #define D_PREFIX "[DEBUG-RELO] "
 
@@ -275,16 +276,30 @@ public:
     // sites of a changed peeked method are not part of mx's compiled body.
     // It also fails if my has an instance call site whose receiver could not be resolved when loading the PAG
     // (methodsWithUnresolvedReceivers), since its receiver types are unknown.
+    // On failure, *reason (if given) names the method and call site and gives the receiver types in p and p'.
     bool check_pa_inlining(const std::unordered_set<int> &depSet, const std::unordered_set<int> &changedSet, PointerAssignmentGraph *p_prime,
                            const std::unordered_map<int, std::unordered_map<std::string, std::unordered_set<std::string>>> &old_callsite_types,
-                           const std::unordered_set<int> &methodsWithUnresolvedReceivers)
+                           const std::unordered_set<int> &methodsWithUnresolvedReceivers, std::string *reason = nullptr)
     {
+        auto fail = [&](const std::string &why) {
+            if (reason)
+                *reason = why;
+            return true;
+        };
+        // "caller callee bci" -> "<caller> bci <bci> -> <callee>"
+        auto callsiteName = [&](const std::string &key) {
+            int caller = 0, callee = 0, bci = 0;
+            if (sscanf(key.c_str(), "%d %d %d", &caller, &callee, &bci) != 3)
+                return key;
+            return methodNameOf(p_prime, caller) + " bci " + std::to_string(bci) + " -> " +
+                   (callee == -1 ? std::string("<unresolved target>") : methodNameOf(p_prime, callee));
+        };
         for (int my : depSet)
         {
             if (changedSet.count(my))
                 continue;
             if (methodsWithUnresolvedReceivers.count(my))
-                return true;
+                return fail("an instance call site in " + methodNameOf(p_prime, my) + " has a receiver that could not be resolved when loading the PAG");
             auto myIt = old_callsite_types.find(my);
             if (myIt == old_callsite_types.end())
                 continue;
@@ -298,15 +313,17 @@ public:
                 // no longer known: do not skip the check silently.
                 auto it = p_prime->CG.callsiteReceivers.find(callsite_key);
                 if (it == p_prime->CG.callsiteReceivers.end() || it->second.empty())
-                    return true;
+                    return fail("call site " + callsiteName(callsite_key) + ": receiver no longer known in p' (types in p " + joinTypes(old_types) + ")");
 
                 std::unordered_set<std::string> new_types = get_types(it->second, p_prime);
 
                 if (old_types.size() == 1 && old_types != new_types)
-                    return true;
+                    return fail("monomorphic call site " + callsiteName(callsite_key) + " changed: receiver types " +
+                                joinTypes(old_types) + " in p, " + joinTypes(new_types) + " in p'");
 
                 if (old_types.size() > 1 && new_types.size() == 1)
-                    return true;
+                    return fail("polymorphic call site " + callsiteName(callsite_key) + " became monomorphic: receiver types " +
+                                joinTypes(old_types) + " in p, " + joinTypes(new_types) + " in p'");
             }
         }
         return false;
@@ -506,6 +523,9 @@ public:
 
     // ESCAPE(o, p) for all o at once: the set of objects o such that REACH(o, u, p) for some u in LEAKY(p).
     // Single multi-source traversal from all leaky nodes, following the same edges as REACH.
+    // bottom_node is leaky too: library (JDK) methods are not analysed, and a call to one links its arguments to
+    // bottom_node, so whatever is passed to the JDK is treated as escaping (e.g. STATIC_LIST.add(o)). Its arguments are
+    // followed like the values stored into a leaky node, so that what is stored into their fields escapes as well.
     std::unordered_set<uint64_t> computeEscapingObjectKeys(PointerAssignmentGraph *p)
     {
         std::unordered_set<uint64_t> escaping;
@@ -517,6 +537,8 @@ public:
             if (u && visited.insert(u).second)
                 queue.push(u);
         }
+        if (p->bottom_node && visited.insert(p->bottom_node).second)
+            queue.push(p->bottom_node);
 
         while (!queue.empty())
         {
@@ -528,74 +550,121 @@ public:
 
             for (PAGEdge *e : current->incoming)
             {
-                if (e->type == EdgeType::PUTFIELD && !e->field.empty() && visited.insert(e->src).second)
+                bool stored = e->type == EdgeType::PUTFIELD && !e->field.empty();
+                bool passedToLibrary = current == p->bottom_node && e->type == EdgeType::ASSIGN;
+                if ((stored || passedToLibrary) && visited.insert(e->src).second)
                     queue.push(e->src);
             }
         }
         return escaping;
     }
 
-    // SyncObjs(.) for all methods in one pass: objects on which a lock is taken in a method (monitorenter operands,
-    // and 'this' of a synchronized instance method), recorded as sync sites "<methodIndex>_<bci>".
-    std::unordered_map<int, std::unordered_set<uint64_t>> computeSyncObjKeysByMethod(PointerAssignmentGraph *p)
+    // ESCAPE_var(v, p) for every synchronization variable in one pass. SyncVars are the variables a lock is taken on
+    // (monitorenter operands, and 'this' of a synchronized instance method), recorded per sync site
+    // "<methodIndex>_<bci>" (bci -1: synchronized method); ESCAPE_var(v, p) = exists o in points_to(v, p) : ESCAPE(o, p),
+    // with ESCAPE(., p) given as `escaping`. Result: sync site -> ESCAPE_var.
+    std::unordered_map<std::string, bool> computeSyncVarEscape(PointerAssignmentGraph *p, const std::unordered_set<uint64_t> &escaping)
     {
-        std::unordered_map<int, std::unordered_set<uint64_t>> byMethod;
+        std::unordered_map<std::string, bool> bySite;
         for (const auto &entry : p->CG.syncSites)
         {
-            int syncMethod = 0, bci = 0;
-            if (sscanf(entry.first.c_str(), "%d_%d", &syncMethod, &bci) != 2)
-                continue;
-            std::unordered_set<uint64_t> &objs = byMethod[syncMethod];
+            bool escapes = false;
             for (PAGNode *lockedVar : entry.second)
             {
                 for (PAGNode *obj : p->points_to(lockedVar))
-                    objs.insert(objKey(obj));
+                {
+                    if (escaping.count(objKey(obj)))
+                    {
+                        escapes = true;
+                        break;
+                    }
+                }
+                if (escapes)
+                    break;
             }
+            bool &site = bySite[entry.first];
+            site = site || escapes;
         }
-        return byMethod;
+        return bySite;
     }
 
-    // OptCheck for lock elision (paper Sec. 3.4). Fails if
-    //   exists my in {mx} U deps(mx), o in SyncObjs(my) : ESCAPE(o, p) != ESCAPE(o, p')
-    // which covers Captured-to-Escaping (safety) and Escaping-to-Captured (missed opportunity).
-    // SyncObjs(my) is taken from both p and p' so that locks added to / removed from a changed dependency are covered.
-    // Objects are identified by allocation site (methodIndex, bci). For objects allocated in a changed method the bci
-    // does not identify the same allocation across versions, so those are compared per allocating method: the
-    // (some escaping, some captured) summary of my's locked objects allocated there must be the same in p and p'.
-    bool check_lock_elision(const std::unordered_set<int> &depSet, const std::unordered_set<int> &changedSet,
-                            const std::unordered_map<int, std::unordered_set<uint64_t>> &old_syncObjs,
-                            const std::unordered_map<int, std::unordered_set<uint64_t>> &new_syncObjs,
-                            const std::unordered_set<uint64_t> &old_escaping, const std::unordered_set<uint64_t> &new_escaping)
+    // Debug output for OptCheck failures: the signature of a PAG method index (linear search, failures only)
+    static std::string methodNameOf(PointerAssignmentGraph *p, int methodIndex)
     {
-        static const std::unordered_set<uint64_t> empty;
-        for (int my : depSet)
+        if (p)
         {
-            auto oldIt = old_syncObjs.find(my);
-            auto newIt = new_syncObjs.find(my);
-            const std::unordered_set<uint64_t> &oldObjs = oldIt != old_syncObjs.end() ? oldIt->second : empty;
-            const std::unordered_set<uint64_t> &newObjs = newIt != new_syncObjs.end() ? newIt->second : empty;
-
-            // allocating (changed) method -> bits: 1 = escaping, 2 = captured
-            std::unordered_map<int, int> oldSummary, newSummary;
-
-            for (uint64_t o : oldObjs)
+            for (const auto &entry : p->_methodIndices)
             {
-                int allocMethod = (int)(uint32_t)(o >> 32);
-                if (changedSet.count(allocMethod))
-                    oldSummary[allocMethod] |= old_escaping.count(o) ? 1 : 2;
-                else if (old_escaping.count(o) != new_escaping.count(o))
-                    return true;
+                if (entry.second == methodIndex)
+                    return entry.first;
             }
-            for (uint64_t o : newObjs)
-            {
-                int allocMethod = (int)(uint32_t)(o >> 32);
-                if (changedSet.count(allocMethod))
-                    newSummary[allocMethod] |= new_escaping.count(o) ? 1 : 2;
-                else if (old_escaping.count(o) != new_escaping.count(o))
-                    return true;
-            }
-            if (oldSummary != newSummary)
-                return true;
+        }
+        return "<method " + std::to_string(methodIndex) + ">";
+    }
+
+    // "<methodIndex>_<bci>" -> "<signature> bci <bci>" (bci -1: synchronized method entry)
+    static std::string syncSiteName(PointerAssignmentGraph *p, const std::string &site)
+    {
+        int method = 0, bci = 0;
+        if (sscanf(site.c_str(), "%d_%d", &method, &bci) != 2)
+            return site;
+        return methodNameOf(p, method) + (bci == -1 ? std::string(" (synchronized method entry)") : " bci " + std::to_string(bci));
+    }
+
+    static std::string joinTypes(const std::unordered_set<std::string> &types)
+    {
+        std::vector<std::string> sorted(types.begin(), types.end());
+        std::sort(sorted.begin(), sorted.end());
+        std::string out = "{";
+        for (size_t i = 0; i < sorted.size(); i++)
+            out += (i ? ", " : "") + sorted[i];
+        return out + "}";
+    }
+
+    // OptCheck for lock elision (paper Sec. 3.4), per synchronization variable:
+    //   exists my in {mx} U deps(mx), v in SyncVars(my) : ESCAPE_var(v, p) != ESCAPE_var(v, p')
+    // with deps(mx) the methods inlined into or peeked into while compiling mx, and ESCAPE_var(v, p) true if at least
+    // one object v may point to in p reaches a leaky node. Covers Captured-to-Escaping (safety) and
+    // Escaping-to-Captured (missed opportunity). The structural check keeps these methods unchanged, so their sites,
+    // identified by (methodIndex, bci), denote the same site in p and p'; a site missing from one PAG counts as not
+    // escaping.
+    // On failure, *reason (if given) describes the site that failed; p is only used to name methods there.
+    bool check_lock_elision(const std::unordered_set<int> &syncMethods,
+                            const std::unordered_map<std::string, bool> &old_syncVarEscape,
+                            const std::unordered_map<std::string, bool> &new_syncVarEscape,
+                            PointerAssignmentGraph *p = nullptr, std::string *reason = nullptr)
+    {
+        auto fail = [&](const std::string &why) {
+            if (reason)
+                *reason = why;
+            return true;
+        };
+        auto escName = [](bool escapes) { return escapes ? "escaping" : "captured"; };
+        // sites of syncMethods present in either PAG
+        auto inSyncMethods = [&](const std::string &site) {
+            int method = 0, bci = 0;
+            return sscanf(site.c_str(), "%d_%d", &method, &bci) == 2 && syncMethods.count(method) != 0;
+        };
+        for (const auto &site : old_syncVarEscape)
+        {
+            if (!inSyncMethods(site.first))
+                continue;
+            auto other = new_syncVarEscape.find(site.first);
+            bool newEscapes = other != new_syncVarEscape.end() && other->second;
+            if (newEscapes != site.second)
+                return fail("SyncVar at " + syncSiteName(p, site.first) + ": " + escName(site.second) + " in p, " +
+                            (other == new_syncVarEscape.end() ? "no such site (captured)" : escName(newEscapes)) + " in p'");
+        }
+        for (const auto &site : new_syncVarEscape)
+        {
+            if (!inSyncMethods(site.first))
+                continue;
+            auto other = old_syncVarEscape.find(site.first);
+            bool oldEscapes = other != old_syncVarEscape.end() && other->second;
+            if (oldEscapes != site.second)
+                return fail("SyncVar at " + syncSiteName(p, site.first) + ": " +
+                            (other == old_syncVarEscape.end() ? "no such site (captured)" : escName(oldEscapes)) + " in p, " +
+                            escName(site.second) + " in p'");
         }
         return false;
     }
@@ -709,6 +778,7 @@ public:
         J9VMThread *vmThread = ((TR_J9VMBase *)comp->fe())->getCurrentVMThread();
         J9JavaVM *javaVM = vmThread->javaVM;
         TR::VMAccessCriticalSection criticalSection(comp);
+        TR::ClassTableCriticalSection classTableLock(comp->fe());
 
         J9ClassLoader *classLoader = NULL;
         GC_PoolIterator classLoaderIterator(javaVM->classLoaderBlocks);

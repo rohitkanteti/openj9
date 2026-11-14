@@ -102,6 +102,31 @@
 
 #define LOCAL_OBJECTS_COLLECTABLE 1
 
+// SmartAOT: records a monitor that escape analysis elides as a dependency of kind 'M' ("<methodSig>#<bci>") of the
+// method being AOT compiled, so that the warm run validates exactly the sync sites the compiled body relies on.
+// <methodSig> is the method the monitor belongs to (the compiled method or an inlined callee); <bci> is the bytecode
+// index of its monitorenter, or -1 for the monitor of a synchronized method (the PAG's sync-site numbering).
+static void smartAOTRecordElidedMonitor(TR::Compilation *comp, const char *methodSig, int32_t bci)
+   {
+   extern bool smartAOTDependencyRecordingEnabled(TR::Compilation *comp);
+   if (!methodSig || !smartAOTDependencyRecordingEnabled(comp))
+      return;
+   extern void smartAOTRecordDependency(const void *compilation, const char *caller, const char *callee, char kind);
+   std::string site = std::string(methodSig) + "#" + std::to_string(bci);
+   smartAOTRecordDependency(comp, comp->signature(), site.c_str(), 'M');
+   }
+
+// The sync site of a monent node; a monexit carries the bci of its monitorexit, so only the monent is recorded.
+static void smartAOTRecordElidedMonitor(TR::Compilation *comp, TR::Node *monitorNode)
+   {
+   if (monitorNode->getOpCodeValue() != TR::monent)
+      return;
+   int16_t inlinedSite = monitorNode->getInlinedSiteIndex();
+   TR_ResolvedMethod *method = inlinedSite != -1 ? comp->getInlinedResolvedMethod(inlinedSite) : comp->getCurrentMethod();
+   int32_t bci = monitorNode->isSyncMethodMonitor() ? -1 : (int32_t)monitorNode->getByteCodeIndex();
+   smartAOTRecordElidedMonitor(comp, method->signature(comp->trMemory()), bci);
+   }
+
 static bool blockIsInLoop(TR::Block *block)
    {
    for (TR_Structure *s = block->getStructureOf()->getParent(); s; s = s->getParent())
@@ -6126,6 +6151,8 @@ bool TR_EscapeAnalysis::fixupNode(TR::Node *node, TR::Node *parent, TR::NodeChec
                   traceMsg(comp(), "Mark call node [%p] as desynchronized\n", node);
                   }
                node->setDesynchronizeCall(true);
+               // the inlined synchronized callee loses the monitor on its receiver
+               smartAOTRecordElidedMonitor(comp(), calledMethod->getResolvedMethod()->signature(trMemory()), -1);
                if (!_inlineCallSites.find(_curTree))
                   _inlineCallSites.add(_curTree);
                }
@@ -6135,6 +6162,7 @@ bool TR_EscapeAnalysis::fixupNode(TR::Node *node, TR::Node *parent, TR::NodeChec
 #if CHECK_MONITORS
             if (trace())
                traceMsg(comp(), "Remove redundant monitor node [%p]\n", node);
+            smartAOTRecordElidedMonitor(comp(), node);
             removeThisNode = true;
 #else
             if (node->getOpCodeValue() == TR::allocationFence)
@@ -6155,6 +6183,7 @@ bool TR_EscapeAnalysis::fixupNode(TR::Node *node, TR::Node *parent, TR::NodeChec
                // redundant monitor elimination get rid of it.
                //
                node->setLocalObjectMonitor(true);
+               smartAOTRecordElidedMonitor(comp(), node);
                requestOpt(OMR::redundantMonitorElimination);
                if (trace())
                   traceMsg(comp(), "Mark monitor node [%p] for candidate [%p] as local object monitor\n", node, candidate->_node);
@@ -8912,6 +8941,7 @@ TR_FlowSensitiveEscapeAnalysis::TR_FlowSensitiveEscapeAnalysis(TR::Compilation *
                   //if (!node->isSyncMethodMonitor())
                      {
                      node->setLocalObjectMonitor(true);
+                     smartAOTRecordElidedMonitor(comp, node);
                      optimizer->setRequestOptimization(OMR::redundantMonitorElimination);
                      //printf("Eliminating monitor in %s\n", comp->signature());
                      }

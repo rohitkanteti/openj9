@@ -157,6 +157,7 @@ IDATA J9THREAD_PROC compilationThreadProc(void *jitconfig);
 IDATA J9THREAD_PROC protectedCompilationThreadProc(J9PortLibrary *portLib, TR::CompilationInfoPerThread *compInfoPT /*void *vmthread*/);
 
 extern TR::OptionSet *findOptionSet(J9Method *, bool);
+extern bool smartAOTTakeUsableBodyFlag(); // RelocationRecord.cpp
 
 #define VM_STATE_COMPILING 64
 #define MAX_NUM_CRASHES 4
@@ -8046,8 +8047,11 @@ TR::CompilationInfoPerThreadBase::postCompilationTasks(J9VMThread *vmThread,
          }
       }
 
+      // Taken for every compilation so that it cannot carry over to the next method on this thread
+      bool smartAOTUsable = smartAOTTakeUsableBodyFlag();
       if (entry->isAotLoad() && entry->_oldStartPC == 0 && startPC != 0) // AOT load that succeeded
       {
+         bool upgradeQueued = false;
          // We know this is a first time compilation (otherwise we would not attempt an AOT load)
          // Before grabbing the compilation monitor and loading the AOT body
          // let's check the AOT hints (optimistically assuming that the AOT load will succeed)
@@ -8071,6 +8075,24 @@ TR::CompilationInfoPerThreadBase::postCompilationTasks(J9VMThread *vmThread,
                {
                   _compInfo.queueForcedAOTUpgrade(entry, hints, _vm);
                }
+               upgradeQueued = true;
+            }
+         }
+
+         // SmartAOT "INVALID (usable)": the body failed an OptCheck but was kept (VALID bodies never get here). It runs
+         // now, and the method is queued for a JIT recompilation that replaces it. With a fixed optLevel sampling never
+         // recompiles a body, so without this the body would stay for the whole run.
+         if (smartAOTUsable && !upgradeQueued && _onSeparateThread && entry->_async)
+         {
+            entry->_newStartPC = startPC;
+            _compInfo.queueForcedAOTUpgrade(entry, TR_HintHot, _vm);
+            if (TR::Options::isAnyVerboseOptionSet())
+            {
+               TR_VerboseLog::CriticalSection vlogLock;
+               TR_VerboseLog::write(TR_Vlog_INFO, "SmartAOT INVALID (usable): %s JIT recompilation of ",
+                                    J9::PrivateLinkage::LinkageInfo::get(startPC)->isBeingCompiled() ? "queued" : "could not queue");
+               CompilationInfo::printMethodNameToVlog(method);
+               TR_VerboseLog::writeLine("");
             }
          }
       }
